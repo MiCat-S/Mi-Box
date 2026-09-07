@@ -207,7 +207,9 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
               processOwnerHint());
             return;
           }
-          await ctx.processes.run("/usr/bin/systemctl", ["reset-failed", updateService], {timeoutMs: 5000, maxOutputBytes: 2000});
+          if (statusRows.some(({key, value}) => key === "ActiveState" && value === "failed")) {
+            await ctx.processes.run("/usr/bin/systemctl", ["reset-failed", updateService], {timeoutMs: 5000, maxOutputBytes: 2000});
+          }
           await ctx.processes.run("/usr/bin/systemctl", ["daemon-reload"], {timeoutMs: 5000, maxOutputBytes: 2000});
           await ctx.processes.run("/usr/bin/systemctl", ["start", "--no-block", updateService],
             {timeoutMs: 5000, maxOutputBytes: 2000});
