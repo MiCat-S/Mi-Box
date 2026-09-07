@@ -1,3 +1,5 @@
+import {installIpPrivacy} from "./ip-privacy";
+import createPrivacy from "./builtins/privacy";
 import path from "node:path";
 import * as fs from "node:fs/promises";
 import {TelegramClient, Api} from "teleproto";
@@ -122,6 +124,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
   const logging = new ResourceScope();
   const rootScope = new ResourceScope();
   let compatibility: ProtocolCompatibility | undefined;
+  let releasePrivacy: (() => void) | undefined;
   const nativeLogger = new Logger(NativeLogLevel.WARN);
   nativeLogger.handler = protocolSink(() => compatibility);
   const logger = new RuntimeLogger(path.join(root, "assets/logger/config.json"), {
@@ -142,6 +145,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
   let lifecycle: RuntimeResult["lifecycle"] | undefined;
   try {
     compatibility = installProtocolCompatibility(client);
+    releasePrivacy = installIpPrivacy(client);
     await client.connect();
     if (!await client.checkAuthorization()) throw new AccountError("CONFIG");
     const me = await client.getMe();
@@ -153,6 +157,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
       telegram: new TeleprotoPort(client, transport, {selfId}), logger, prefixes: prefixesFromEnv(environment),
       processes: {concurrency: 2, queueCapacity: 16, timeoutMs: 180_000, maxOutputBytes: 2 * 1024 * 1024},
     });
+    await host.load(createPrivacy(selfId));
     await host.load(createHelp(host, selfId));
     await host.load(createAlias(host));
     await host.load(createPrefix(host, new PrefixEnvStore(path.join(root, ".env"))));
@@ -189,7 +194,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
         if (!signal.aborted) logger.error("runtime.message_failed", {kind: error instanceof Error ? error.name : "unknown"});
       }
     }, {selfId});
-    logLine("info", "runtime.ready", {plugins: DAILY_PLUGINS.length, builtins: 18,
+    logLine("info", "runtime.ready", {plugins: DAILY_PLUGINS.length, builtins: 19,
       extensions: releases.snapshot().generations.length});
     const stopped = waitForStop(options.signals ?? ["SIGINT", "SIGTERM"], rootScope);
     await restart.notifyReady();
@@ -214,6 +219,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     await attempt(async () => {transportReport = await transport.drain(15000); requireComplete("transport", transportReport);});
     await attempt(async () => {loggingReport = await logging.drain(15000); requireComplete("logging", loggingReport);});
     await attempt(() => client.destroy());
+    releasePrivacy?.();
     compatibility?.cleanup();
     await attempt(releaseLock);
     lifecycle = {host: hostReport, events: eventReport, transport: transportReport, logging: loggingReport};

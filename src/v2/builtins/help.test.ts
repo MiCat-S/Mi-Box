@@ -169,7 +169,12 @@ test("main help shows single commands, grouped modules, dynamic prefixes and rep
   for (const entry of messages) assert.equal(entry.message, f.message);
 });
 
-
+test("privacy command is listed with system tools", async (t) => {
+  const f = fixture(t, [plugin("privacy")]);
+  const text = visible(await f.run());
+  assert.match(text, /系统工具[\s\S]*\.privacy/);
+  assert.doesNotMatch(text, /扩展插件/);
+});
 
 test("production-sized rich-text catalog fits one compact message", async (t) => {
   const ids = "agent ai alias autofix bf da dc dme env exec gt ids ip leech loglevel memory nodeseek ping prefix rate re restart status sudo sum sure sysinfo tpm update yvlu".split(" ");

@@ -1,3 +1,4 @@
+export {maskIpText, getIpPrivacy} from "./ip-privacy";
 export {getBotName} from "./branding";
 export * as ui from "./ui";
 import type { ResourceScope } from "./lifecycle";

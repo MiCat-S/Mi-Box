@@ -47,7 +47,7 @@ test('runtime loads only the requested default builtins', async () => {
     };
     visitLoads(source);
     assert.deepEqual(builtins.sort(), ['agent', 'alias', 'autofix', 'bf', 'env', 'exec', 'help', 'loglevel',
-      'memory', 'ping', 'prefix', 'restart', 'status', 'sudo', 'sysinfo', 'tpm', 'update', 'version'].sort());
+      'memory', 'ping', 'prefix', 'privacy', 'restart', 'status', 'sudo', 'sysinfo', 'tpm', 'update', 'version'].sort());
   } finally {
     api.close();
   }

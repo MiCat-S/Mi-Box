@@ -12,7 +12,7 @@ const pluginIcons: Readonly<Record<string, string>> = {
   ai: "🤖", da: "🛡️", dc: "🌐", dme: "🗑️", gt: "🌍", ids: "🪪",
   ip: "📍", nodeseek: "🔎", rate: "💱", sum: "📝", yvlu: "🖼️",
   memory: "🧠", ping: "🏓", status: "📊", env: "⚙️", alias: "🔗",
-  prefix: "📌", loglevel: "🔊", help: "❔",
+  prefix: "📌", privacy: "🔒", loglevel: "🔊", help: "❔",
 };
 
 function aliasesFor(commandName: string, aliases: Readonly<Record<string, string>>): string[] {
@@ -72,7 +72,7 @@ export async function buildOverview(input: OverviewInput): Promise<DocumentOptio
   const aliases = configuration.aliases;
   const groups: ReadonlyArray<[string, ReadonlySet<string>]> = [
     ["常用命令", new Set(["agent", "ai", "gt", "memory", "ping", "status", "sysinfo", "tpm", "update"])],
-    ["系统工具", new Set(["alias", "autofix", "bf", "env", "exec", "help", "loglevel", "prefix", "restart", "sudo", "version"])],
+    ["系统工具", new Set(["alias", "autofix", "bf", "env", "exec", "help", "loglevel", "prefix", "privacy", "restart", "sudo", "version"])],
   ];
   const listed = new Set<string>();
   const sections: Section[] = [];
