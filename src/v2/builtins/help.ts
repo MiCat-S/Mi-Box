@@ -1,3 +1,4 @@
+import {brandText, getBotName, setBotName} from "../branding";
 import type { PluginHost } from "../host";
 import { definePlugin, type CommandInvocation, type PluginContext, type PluginDefinition } from "../sdk";
 
@@ -161,9 +162,29 @@ function resolve(
   return plugin && { plugin, usage: plugin.commands[0]?.name };
 }
 
-export function createHelp(host: HelpHost): PluginDefinition {
+export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
   const handle = async (invocation: CommandInvocation, context: PluginContext): Promise<void> => {
     context.signal.throwIfAborted();
+    if (invocation.args[0] === "name") {
+      const value = invocation.args.slice(1).join(" ").trim();
+      if (!value) {
+        await context.telegram.edit(invocation.message, `当前显示名：${getBotName()}\n设置：${invocation.prefix}help name 名称\n恢复：${invocation.prefix}help name reset`);
+        return;
+      }
+      if (!ownerId || !invocation.message.outgoing || invocation.message.senderId !== ownerId || invocation.message.chatId !== ownerId) {
+        await context.telegram.edit(invocation.message, "请由账号本人在收藏夹设置显示名");
+        return;
+      }
+      const name = value === "reset" ? "MiBot" : value;
+      if (!name || [...name].length > 48 || /[\u0000-\u001f\u007f]/u.test(name)) {
+        await context.telegram.edit(invocation.message, "名称须为 1–48 个字符，不能包含换行或控制字符");
+        return;
+      }
+      await context.storage.json("branding.json", {name: "MiBot"}).update(state => ({...state, name}));
+      setBotName(name);
+      await context.telegram.edit(invocation.message, `显示名已设为：${getBotName()}`);
+      return;
+    }
     let output: string[];
     try {
       const format = await formatter();
@@ -177,7 +198,7 @@ export function createHelp(host: HelpHost): PluginDefinition {
       const add = (html: string): void => { blocks.push(...format.normalize(html)); };
       const query = invocation.args.join(" ").trim();
       if (!query) {
-        add(`<b>MiBot 控制台</b>  <code>${commands.length} 个命令</code>`);
+        add(brandText(`<b>MiBot 控制台</b>  <code>${commands.length} 个命令</code>`));
         add(`前缀 ${configuration.prefixes.map(code).join(" · ")}`);
         const groups: ReadonlyArray<[string, ReadonlySet<string>]> = [
           ["常用命令", new Set(["agent", "ai", "gt", "memory", "ping", "status", "sysinfo", "tpm", "update"])],
@@ -234,7 +255,7 @@ export function createHelp(host: HelpHost): PluginDefinition {
         if (commands.some((entry) => entry.name === "tpm")) {
           add(`${code(prefix + "tpm search")} 显示远程插件列表`);
         }
-        add(`<a href="https://github.com/MiCat-S/Mi-Box">MiBot 仓库</a> | <a href="https://github.com/MiCat-S/Mi-Box-Plugins">插件仓库</a>`);
+        add(`<a href="https://github.com/MiCat-S/Mi-Box">${escape(getBotName())} 仓库</a> | <a href="https://github.com/MiCat-S/Mi-Box-Plugins">插件仓库</a>`);
         output = pages(blocks);
       } else {
         const target = resolve(query, plugins, configuration.prefixes, aliases);
@@ -280,7 +301,11 @@ export function createHelp(host: HelpHost): PluginDefinition {
   return definePlugin({
     apiVersion: 1,
     id: "help",
-    description: "查看帮助信息和可用命令列表",
+    async setup(context) {
+      const state = await context.storage.json("branding.json", {name: "MiBot"}).read();
+      setBotName(state.name);
+    },
+    description: "查看帮助；收藏夹使用 help name 名称 设置显示名，help name reset 恢复默认",
     commands: {
       help: { description: "查看命令或模块帮助", handle },
       h: { description: "查看命令或模块帮助", handle },

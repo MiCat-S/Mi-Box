@@ -1,3 +1,4 @@
+import {brandText} from "../branding";
 import {randomUUID} from "node:crypto";
 import {definePlugin, type PluginContext} from "../sdk";
 import {isOwner} from "../permissions";
@@ -37,10 +38,10 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
       return "未能读取运行时用户信息。";
     }
   };
-  const definition = definePlugin({apiVersion: 1, id: "restart", description: "重启 MiBot systemd 服务",
+  const definition = definePlugin({apiVersion: 1, id: "restart", description: "重启 systemd 服务",
     setup(ctx) { context = ctx; },
     cleanup() { context = undefined; },
-    commands: {restart: {description: "重启当前 MiBot 服务", ignoreEdited: true, async handle(invocation, ctx) {
+    commands: {restart: {description: "重启当前服务", ignoreEdited: true, async handle(invocation, ctx) {
       ctx.signal.throwIfAborted();
       if (!isOwner(invocation.message, ownerId)) {
         await ctx.telegram.edit(invocation.message, "没有重启服务的权限");
@@ -54,7 +55,7 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
       const receipt: Receipt = {ownerId, chatId: invocation.message.chatId, messageId: invocation.message.id,
         requestedAt: Date.now(), bootId};
       try {
-        await ctx.telegram.edit(invocation.message, "<b>MiBot 重启</b>\n正在提交重启请求…", {parseMode: "html"});
+        await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 重启</b>\n正在提交重启请求…"), {parseMode: "html"});
         ctx.signal.throwIfAborted();
         await store(ctx).update(() => ({pending: receipt}));
       } catch (error) {
@@ -88,7 +89,7 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
         return;
       }
       await ctx.telegram.edit({id: pending.messageId, chatId: pending.chatId, text: "", outgoing: true},
-        "<b>MiBot 重启成功</b>\n服务已就绪", {parseMode: "html"});
+        brandText("<b>MiBot 重启成功</b>\n服务已就绪"), {parseMode: "html"});
       await clear(ctx, pending);
     } catch {
       if (!ctx.signal.aborted) ctx.log.error("restart.receipt_failed");

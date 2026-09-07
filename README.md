@@ -59,3 +59,12 @@ TPM 仅允许账号所有者管理扩展。安装和更新从配套插件仓库�
 
 `config.json`、`.env`、`assets/` 含账号和插件数据，不得公开上传。
 服务管理见 [运维说明](deploy/systemd/README.md)，许可证见 [LICENSE](LICENSE)。
+
+### 自定义显示名
+
+在账号本人的收藏夹发送 `.help name Cat Bot`，即可将帮助、更新、重启及年度报告中的显示名设置为 `Cat Bot`。支持空格和中文，最多 48 个字符；设置立即生效，并保存到 `assets/help/branding.json`。
+
+- `.help name`：查看当前显示名。
+- `.help name reset`：恢复默认 `MiBot`。
+
+扩展插件通过 `telebox/sdk` 的 `getBotName()` 读取当前显示名；拼入 HTML 时须转义。服务名、命令和仓库地址保持固定。

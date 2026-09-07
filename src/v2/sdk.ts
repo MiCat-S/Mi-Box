@@ -1,3 +1,4 @@
+export {getBotName} from "./branding";
 import type { ResourceScope } from "./lifecycle";
 import type { JsonStore } from "./storage";
 import type { ScheduledJob } from "./scheduler";

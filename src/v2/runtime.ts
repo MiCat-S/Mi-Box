@@ -153,7 +153,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
       telegram: new TeleprotoPort(client, transport, {selfId}), logger, prefixes: prefixesFromEnv(environment),
       processes: {concurrency: 2, queueCapacity: 16, timeoutMs: 180_000, maxOutputBytes: 2 * 1024 * 1024},
     });
-    await host.load(createHelp(host));
+    await host.load(createHelp(host, selfId));
     await host.load(createAlias(host));
     await host.load(createPrefix(host, new PrefixEnvStore(path.join(root, ".env"))));
     await host.load(createLogLevel(logger));

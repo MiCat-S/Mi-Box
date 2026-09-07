@@ -1,3 +1,4 @@
+import {brandText, getBotName, setBotName} from "../branding";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Parser } from "htmlparser2";
@@ -451,4 +452,33 @@ test("50 help cycles keep scope resources empty and produce independent current 
     assert.equal(f.scope.snapshot().pendingTasks, 0);
     assert.equal(f.scope.snapshot().pendingResources, 0);
   }
+});
+
+test("display name persists, escapes HTML, resets, and restricts changes to the owner Saved Messages", async t => {
+  const original = getBotName();
+  t.after(() => setBotName(original));
+  const f = fixture(t);
+  let saved = {name: "MiBot"};
+  let writes = 0;
+  const context = {...f.context, storage: {json: () => ({read: async () => saved,
+    update: async (fn: (s: typeof saved) => typeof saved) => { writes++; saved = fn(saved); return saved; }})}} as unknown as PluginContext;
+  const help = createHelp(f.host, "42");
+  const message = {...f.message, senderId: "42", chatId: "42"};
+  const run = (args: string[], target = message) => help.commands.help.handle({message: target, prefix: ".", command: "help", args}, context);
+  await run(["name", "Cat <Bot> & Co"]);
+  assert.equal(getBotName(), "Cat <Bot> & Co");
+  assert.equal(brandText("MiBot 重启"), "Cat &lt;Bot&gt; &amp; Co 重启");
+  await run([]);
+  assert.ok(f.sent.some(s => s.text.includes("Cat &lt;Bot&gt; &amp; Co 控制台")));
+  assert.ok(f.sent.some(s => s.text.includes('href="https://github.com/MiCat-S/Mi-Box"')));
+  setBotName("temporary");
+  await help.setup!(context);
+  assert.equal(getBotName(), "Cat <Bot> & Co");
+  await run(["name", "other"], {...message, chatId: "-1001"});
+  await run(["name", "other"], {...message, senderId: "99"});
+  await run(["name", "x".repeat(49)]);
+  assert.equal(writes, 1);
+  assert.equal(getBotName(), "Cat <Bot> & Co");
+  await run(["name", "reset"]);
+  assert.equal(saved.name, "MiBot");
 });
