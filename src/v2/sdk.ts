@@ -4,7 +4,7 @@ import type { ScheduledJob } from "./scheduler";
 import type { ScopedHttp } from "./http";
 import type { TelegramClient } from "teleproto";
 import type { SqliteStore, SqliteOptions } from "./sqlite";
-import type {ScopedProcesses} from "./processes";
+import type {ProcessLimits, ScopedProcesses} from "./processes";
 import type {SettingsAdapter} from "./settings";
 import type {ScopedFiles} from "./files";
 
@@ -106,6 +106,10 @@ export interface PluginDefinition {
   readonly jobs?: Readonly<Record<string, JobDefinition>>;
   readonly services?: Readonly<Record<string, ServiceDefinition>>;
   readonly settings?: (context: PluginContext) => SettingsAdapter;
+  /** Optional per-plugin helper-process defaults, bounded by the host's hard limits. */
+  readonly resources?: {
+    readonly processes?: Pick<ProcessLimits, "concurrency" | "queueCapacity" | "timeoutMs" | "maxOutputBytes">;
+  };
   setup?(context: PluginContext): void | Promise<void>;
   cleanup?(context: PluginContext): void | Promise<void>;
 }
@@ -137,7 +141,11 @@ export function definePlugin(definition: PluginDefinition): PluginDefinition {
   }
   const freezeEntries = <T extends object>(entries: Readonly<Record<string, T>> | undefined) => entries &&
     Object.freeze(Object.fromEntries(Object.entries(entries).map(([name, value]) => [name, Object.freeze({...value})])));
-  return Object.freeze({...definition, commands: Object.freeze(commands),
+  const resources = definition.resources && Object.freeze({
+    ...definition.resources,
+    processes: definition.resources.processes && Object.freeze({...definition.resources.processes}),
+  });
+  return Object.freeze({...definition, resources, commands: Object.freeze(commands),
     listeners: definition.listeners && Object.freeze(definition.listeners.map(listener => Object.freeze({...listener}))),
     jobs: freezeEntries(definition.jobs), services: freezeEntries(definition.services),
   });

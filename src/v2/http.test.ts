@@ -105,6 +105,54 @@ test("passes URL objects and request fields intact, using the built-in fetch by 
   await scope.drain();
 });
 
+test("redirect policy validates every hop and strips credentials across origins", async () => {
+  const scope = new ResourceScope();
+  const calls: {url: string; init: RequestInit}[] = [];
+  const http = new ScopedHttp(scope, {fetch: async (input, init) => {
+    const url = input.toString();
+    calls.push({url, init: init!});
+    if (calls.length === 1) return new Response(null, {status: 302, headers: {location: "https://cdn.allowed.invalid/file"}});
+    return new Response("done");
+  }});
+  const value = await http.text("https://api.allowed.invalid/start", {
+    headers: {authorization: SECRET, cookie: SECRET, "x-public": "yes"}, redirect: "follow",
+  }, {redirects: {allowedHosts: ["api.allowed.invalid", "cdn.allowed.invalid"]}});
+  assert.equal(value, "done");
+  assert.deepEqual(calls.map(call => call.url), [
+    "https://api.allowed.invalid/start", "https://cdn.allowed.invalid/file",
+  ]);
+  assert.equal(calls[0].init.redirect, "manual");
+  const redirectedHeaders = new Headers(calls[1].init.headers);
+  assert.equal(redirectedHeaders.has("authorization"), false);
+  assert.equal(redirectedHeaders.has("cookie"), false);
+  assert.equal(redirectedHeaders.get("x-public"), "yes");
+  await scope.drain();
+});
+
+test("redirect policy blocks the initial URL, disallowed hops, and redirect loops", async () => {
+  const scope = new ResourceScope();
+  let calls = 0;
+  const http = new ScopedHttp(scope, {fetch: async () => {
+    calls += 1;
+    return new Response(null, {status: 302, headers: {location: "https://blocked.invalid/secret"}});
+  }});
+  await assert.rejects(http.text("https://blocked.invalid/start", {}, {
+    redirects: {allowedHosts: ["allowed.invalid"]},
+  }), code("REDIRECT_BLOCKED"));
+  assert.equal(calls, 0);
+  await assert.rejects(http.text("https://allowed.invalid/start", {}, {
+    redirects: {allowedHosts: ["allowed.invalid"]},
+  }), code("REDIRECT_BLOCKED"));
+  assert.equal(calls, 1);
+
+  const loop = new ScopedHttp(scope, {fetch: async () =>
+    new Response(null, {status: 307, headers: {location: "/again"}})});
+  await assert.rejects(loop.text("https://allowed.invalid/start", {}, {
+    redirects: {allowedHosts: ["allowed.invalid"], maxRedirects: 1},
+  }), code("TOO_MANY_REDIRECTS"));
+  await scope.drain();
+});
+
 test("deadline defaults to 30 seconds and successful requests clear timers and listeners", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const setTimer = t.mock.method(globalThis, "setTimeout");

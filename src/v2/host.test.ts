@@ -411,3 +411,35 @@ test("helper execution is a shared account budget, lazily allocated across plugi
   assert.deepEqual(results.map(value => value.stdout.toString()), ['one', 'two']);
   assert.equal(host.snapshot().processes?.active, 0);
 });
+
+test("plugin helper declarations are bounded by host limits and enforce local queues", async t => {
+  const {host} = await fixture(t, {processes: {
+    concurrency: 2, queueCapacity: 4, timeoutMs: 200, maxOutputBytes: 2048,
+  }});
+  let context!: PluginContext;
+  const declared = plugin(() => {}, {
+    resources: {processes: {concurrency: 1, queueCapacity: 1, timeoutMs: 150, maxOutputBytes: 1024}},
+    setup(value) { context = value; },
+  });
+  host.preflight(declared);
+  await host.load(declared);
+  const one = context.processes.run(process.execPath, ["-e", "setTimeout(() => {}, 50)"]);
+  const two = context.processes.run(process.execPath, ["-e", "process.stdout.write('two')"]);
+  await assert.rejects(context.processes.run(process.execPath, ["-e", "process.exit(1)"]), /queue is full/);
+  assert.throws(() => context.processes.run(process.execPath, ["-e", ""], {timeoutMs: 151}), /declared limit/);
+  assert.throws(() => context.processes.run(process.execPath, ["-e", ""], {maxOutputBytes: 1025}), /declared limit/);
+  await Promise.all([one, two]);
+});
+
+test("plugin helper declarations exceeding host limits fail before setup", async t => {
+  const {host} = await fixture(t, {processes: {timeoutMs: 100, maxOutputBytes: 1024}});
+  let setup = false;
+  const definition = plugin(() => {}, {
+    resources: {processes: {timeoutMs: 101}},
+    setup() { setup = true; },
+  });
+  assert.throws(() => host.preflight(definition), /exceeds host limit/);
+  await assert.rejects(host.load(definition), /exceeds host limit/);
+  assert.equal(setup, false);
+  assert.equal(host.pluginState("ping"), undefined);
+});

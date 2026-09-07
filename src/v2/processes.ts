@@ -17,6 +17,17 @@ export interface ProcessLimits {
   killGraceMs?: number;
 }
 
+export type ResolvedProcessLimits = Required<ProcessLimits>;
+
+export const DEFAULT_PROCESS_LIMITS: Readonly<ResolvedProcessLimits> = Object.freeze({
+  concurrency: 1,
+  queueCapacity: 8,
+  maxOutputBytes: 1_048_576,
+  maxInputBytes: 1_048_576,
+  timeoutMs: 30_000,
+  killGraceMs: 250,
+});
+
 export interface ProcessRunOptions {
   /** Absolute directory; defaults to the caller's cwd captured at admission. */
   cwd?: string;
@@ -104,6 +115,17 @@ function integer(value: number, minimum: number, maximum: number): number {
   return value;
 }
 
+export function resolveProcessLimits(limits: ProcessLimits = {}): ResolvedProcessLimits {
+  return {
+    concurrency: integer(limits.concurrency ?? DEFAULT_PROCESS_LIMITS.concurrency, 1, Number.MAX_SAFE_INTEGER),
+    queueCapacity: integer(limits.queueCapacity ?? DEFAULT_PROCESS_LIMITS.queueCapacity, 0, Number.MAX_SAFE_INTEGER),
+    maxOutputBytes: integer(limits.maxOutputBytes ?? DEFAULT_PROCESS_LIMITS.maxOutputBytes, 0, Number.MAX_SAFE_INTEGER),
+    maxInputBytes: integer(limits.maxInputBytes ?? DEFAULT_PROCESS_LIMITS.maxInputBytes, 0, Number.MAX_SAFE_INTEGER),
+    timeoutMs: integer(limits.timeoutMs ?? DEFAULT_PROCESS_LIMITS.timeoutMs, 1, TIMER_MAX),
+    killGraceMs: integer(limits.killGraceMs ?? DEFAULT_PROCESS_LIMITS.killGraceMs, 0, TIMER_MAX),
+  };
+}
+
 function observed<T>(promise: Promise<T>): Promise<T> {
   void promise.catch(() => undefined);
   return promise;
@@ -151,14 +173,7 @@ export class ScopedProcesses {
   private sequence = 0;
 
   constructor(private readonly scope: ResourceScope, limits: ProcessLimits = {}) {
-    this.limits = {
-      concurrency: integer(limits.concurrency ?? 1, 1, Number.MAX_SAFE_INTEGER),
-      queueCapacity: integer(limits.queueCapacity ?? 8, 0, Number.MAX_SAFE_INTEGER),
-      maxOutputBytes: integer(limits.maxOutputBytes ?? 1_048_576, 0, Number.MAX_SAFE_INTEGER),
-      maxInputBytes: integer(limits.maxInputBytes ?? 1_048_576, 0, Number.MAX_SAFE_INTEGER),
-      timeoutMs: integer(limits.timeoutMs ?? 30_000, 1, TIMER_MAX),
-      killGraceMs: integer(limits.killGraceMs ?? 250, 0, TIMER_MAX),
-    };
+    this.limits = resolveProcessLimits(limits);
     this.executor = new KeyedExecutor(this.limits.concurrency, this.limits.queueCapacity, scope.signal);
     this.dispose = scope.add("helper-processes", () => {
       this.closed = true;

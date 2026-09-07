@@ -150,7 +150,9 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     await logger.initialize();
     client.setLogLevel(logger.getProtocolLevel() as NativeLogLevel);
     host = new PluginHost({storageRoot: path.join(root, "assets"), tempRoot: path.join(root, "temp"),
-      telegram: new TeleprotoPort(client, transport, {selfId}), logger, prefixes: prefixesFromEnv(environment)});
+      telegram: new TeleprotoPort(client, transport, {selfId}), logger, prefixes: prefixesFromEnv(environment),
+      processes: {concurrency: 2, queueCapacity: 16, timeoutMs: 180_000, maxOutputBytes: 2 * 1024 * 1024},
+    });
     await host.load(createHelp(host));
     await host.load(createAlias(host));
     await host.load(createPrefix(host, new PrefixEnvStore(path.join(root, ".env"))));

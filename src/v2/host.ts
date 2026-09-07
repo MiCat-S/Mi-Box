@@ -6,7 +6,7 @@ import { ScopedHttp, type ScopedHttpOptions } from "./http";
 import type { TelegramClient } from "teleproto";
 import path from "node:path";
 import {SqliteStore, type SqliteConnection, type SqliteOptions} from "./sqlite";
-import {ScopedProcesses, type ProcessLimits, type ProcessRunOptions} from "./processes";
+import {DEFAULT_PROCESS_LIMITS, resolveProcessLimits, ScopedProcesses, type ProcessLimits, type ProcessRunOptions} from "./processes";
 import {SettingsRegistry} from "./settings";
 import {ScopedFiles} from "./files";
 import { definePlugin, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type TelegramPort } from "./sdk";
@@ -34,12 +34,14 @@ export class PluginHost {
   private readonly scheduler: PluginScheduler;
   private readonly settings = new SettingsRegistry();
   private processes?: ScopedProcesses;
+  private readonly processCaps: Required<ProcessLimits>;
   private readonly plugins = new Map<string, LoadedPlugin>();
   private readonly commands = new Map<string, CommandTarget>();
   private prefixes: readonly string[] = [];
   private aliases: ReadonlyMap<string, string>;
 
   constructor(private readonly options: HostOptions) {
+    this.processCaps = resolveProcessLimits(options.processes);
     this.replacePrefixes(options.prefixes === undefined ? ["."] : options.prefixes);
     this.aliases = new Map();
     this.replaceAliases(options.aliases ?? {});
@@ -118,10 +120,29 @@ export class PluginHost {
   preflight(input: PluginDefinition, replacingId?: string): void {
     this.root.signal.throwIfAborted();
     const definition = definePlugin(input);
+    this.validateProcessRequirements(definition);
     if (this.plugins.has(definition.id) && definition.id !== replacingId) throw new Error("Plugin already loaded");
     for (const name of Object.keys(definition.commands)) {
       const target = this.commands.get(name);
       if (target && target.plugin.definition.id !== replacingId) throw new Error("Command conflict");
+    }
+  }
+
+  private validateProcessRequirements(definition: PluginDefinition): void {
+    const requested = definition.resources?.processes;
+    if (!requested) return;
+    const limits = resolveProcessLimits({
+      concurrency: requested.concurrency ?? Math.min(DEFAULT_PROCESS_LIMITS.concurrency, this.processCaps.concurrency),
+      queueCapacity: requested.queueCapacity ?? Math.min(DEFAULT_PROCESS_LIMITS.queueCapacity, this.processCaps.queueCapacity),
+      timeoutMs: requested.timeoutMs ?? Math.min(DEFAULT_PROCESS_LIMITS.timeoutMs, this.processCaps.timeoutMs),
+      maxOutputBytes: requested.maxOutputBytes ?? Math.min(DEFAULT_PROCESS_LIMITS.maxOutputBytes, this.processCaps.maxOutputBytes),
+      maxInputBytes: Math.min(DEFAULT_PROCESS_LIMITS.maxInputBytes, this.processCaps.maxInputBytes),
+      killGraceMs: Math.min(DEFAULT_PROCESS_LIMITS.killGraceMs, this.processCaps.killGraceMs),
+    });
+    for (const key of ["concurrency", "queueCapacity", "timeoutMs", "maxOutputBytes"] as const) {
+      if (requested[key] !== undefined && limits[key] > this.processCaps[key]) {
+        throw new Error(`Plugin ${definition.id} process ${key} exceeds host limit`);
+      }
     }
   }
 
@@ -130,17 +151,47 @@ export class PluginHost {
     storage.sqlite.clear();
   }
 
-  private contextFor(id: string, scope: ResourceScope, storage: PluginStorage): PluginContext {
+  private contextFor(definition: PluginDefinition, scope: ResourceScope, storage: PluginStorage): PluginContext {
+    const id = definition.id;
     const combined = (signal: AbortSignal, caller?: AbortSignal) => caller ? AbortSignal.any([signal, caller]) : signal;
+    const requested = definition.resources?.processes;
+    const pluginProcessLimits = requested && resolveProcessLimits({
+      concurrency: requested.concurrency ?? Math.min(DEFAULT_PROCESS_LIMITS.concurrency, this.processCaps.concurrency),
+      queueCapacity: requested.queueCapacity ?? Math.min(DEFAULT_PROCESS_LIMITS.queueCapacity, this.processCaps.queueCapacity),
+      timeoutMs: requested.timeoutMs ?? Math.min(DEFAULT_PROCESS_LIMITS.timeoutMs, this.processCaps.timeoutMs),
+      maxOutputBytes: requested.maxOutputBytes ?? Math.min(DEFAULT_PROCESS_LIMITS.maxOutputBytes, this.processCaps.maxOutputBytes),
+      maxInputBytes: Math.min(DEFAULT_PROCESS_LIMITS.maxInputBytes, this.processCaps.maxInputBytes),
+      killGraceMs: Math.min(DEFAULT_PROCESS_LIMITS.killGraceMs, this.processCaps.killGraceMs),
+    });
+    const processQueue = pluginProcessLimits && new KeyedExecutor(
+      pluginProcessLimits.concurrency, pluginProcessLimits.queueCapacity, scope.signal,
+    );
+    if (processQueue) scope.add("plugin-process-queue", () => processQueue.close());
+    const runProcess = (command: string, args: readonly string[] = [], options: ProcessRunOptions = {}) => {
+      if (pluginProcessLimits) {
+        if (options.timeoutMs !== undefined && options.timeoutMs > pluginProcessLimits.timeoutMs) {
+          throw new RangeError("Plugin helper timeout exceeds declared limit");
+        }
+        if (options.maxOutputBytes !== undefined && options.maxOutputBytes > pluginProcessLimits.maxOutputBytes) {
+          throw new RangeError("Plugin helper output exceeds declared limit");
+        }
+      }
+      const invocation = {
+        ...options,
+        timeoutMs: options.timeoutMs ?? pluginProcessLimits?.timeoutMs,
+        maxOutputBytes: options.maxOutputBytes ?? pluginProcessLimits?.maxOutputBytes,
+      };
+      return scope.run("process:run", signal => {
+        this.processes ??= new ScopedProcesses(this.root, this.processCaps);
+        const execute = () => this.processes!.run(command, args, {...invocation, signal: combined(signal, options.signal)});
+        return processQueue ? processQueue.submit("process", execute, signal) : execute();
+      });
+    };
     return Object.freeze({
       signal: scope.signal, tasks: scope, log: this.options.logger,
       http: new ScopedHttp(scope, this.options.http),
       files: new ScopedFiles(scope, this.options.storageRoot, this.options.tempRoot ?? path.join(this.options.storageRoot, '.temp'), id),
-      processes: {run: (command: string, args: readonly string[] = [], options: ProcessRunOptions = {}) =>
-        scope.run("process:run", signal => {
-          this.processes ??= new ScopedProcesses(this.root, this.options.processes);
-          return this.processes.run(command, args, {...options, signal: combined(signal, options.signal)});
-        })},
+      processes: {run: runProcess},
       storage: {json: <T extends Record<string, unknown>>(file: string, defaults: T): Pick<JsonStore<T>, "read" | "update"> => {
         const store = storage.json.json(id, file, defaults);
         return Object.freeze({
@@ -204,13 +255,14 @@ export class PluginHost {
   async load(input: PluginDefinition, owner?: object): Promise<void> {
     this.root.signal.throwIfAborted();
     const definition = definePlugin(input);
+    this.validateProcessRequirements(definition);
     if (this.plugins.has(definition.id)) throw new Error(`Plugin already loaded: ${definition.id}`);
     for (const name of Object.keys(definition.commands)) {
       if (this.commands.has(name)) throw new Error(`Command conflict: ${name}`);
     }
     const scope = new ResourceScope(this.root.signal);
     const storage: PluginStorage = {json: new StorageRoot(this.options.storageRoot), sqlite: new Map()};
-    const context = this.contextFor(definition.id, scope, storage);
+    const context = this.contextFor(definition, scope, storage);
     const plugin: LoadedPlugin = {definition, scope, storage, context, ready: false, owner};
     this.plugins.set(definition.id, plugin);
     // Reserve names before asynchronous setup so concurrent loads cannot collide.

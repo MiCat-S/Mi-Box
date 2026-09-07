@@ -9,6 +9,8 @@ const messages = {
   CONNECTION_REFUSED: "HTTP connection was refused",
   FAILED: "HTTP operation failed",
   CLEANUP_FAILED: "HTTP response cleanup failed",
+  REDIRECT_BLOCKED: "HTTP redirect target is not allowed",
+  TOO_MANY_REDIRECTS: "HTTP response exceeded the redirect limit",
   CLOSED: "HTTP response lifetime ended",
 } as const;
 
@@ -47,12 +49,65 @@ export interface ScopedHttpOptions {
 export interface HttpRequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** When set, redirects are followed manually and every target hostname is checked. */
+  redirects?: {
+    allowedHosts: readonly string[];
+    maxRedirects?: number;
+  };
 }
 
 function validateTimeout(timeoutMs: number): void {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
     throw new RangeError("timeoutMs must be finite and between 0 and 2147483647");
   }
+}
+
+function redirectConfiguration(options: HttpRequestOptions["redirects"]): {allowed: ReadonlySet<string>; maximum: number} | undefined {
+  if (!options) return;
+  if (!Array.isArray(options.allowedHosts) || options.allowedHosts.length === 0) {
+    throw new TypeError("Redirect policy requires at least one hostname");
+  }
+  const allowed = new Set<string>();
+  for (const host of options.allowedHosts) {
+    if (typeof host !== "string" || !host || host !== host.trim() || /[/:@\s\0]/u.test(host)) {
+      throw new TypeError("Redirect policy contains an invalid hostname");
+    }
+    allowed.add(host.toLowerCase());
+  }
+  const maximum = options.maxRedirects ?? 5;
+  if (!Number.isSafeInteger(maximum) || maximum < 0 || maximum > 20) {
+    throw new RangeError("maxRedirects must be an integer between 0 and 20");
+  }
+  return {allowed, maximum};
+}
+
+function allowedURL(input: string | URL, base: URL | undefined, hosts: ReadonlySet<string>): URL {
+  let url: URL;
+  try { url = base ? new URL(input.toString(), base) : new URL(input.toString()); }
+  catch { throw new HttpError("REDIRECT_BLOCKED"); }
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || !hosts.has(url.hostname.toLowerCase())) {
+    throw new HttpError("REDIRECT_BLOCKED");
+  }
+  return url;
+}
+
+function redirectedInit(current: URL, next: URL, status: number, input: RequestInit): RequestInit {
+  const output: RequestInit = {...input, redirect: "manual"};
+  if (current.origin !== next.origin) {
+    const headers = new Headers(input.headers);
+    for (const name of ["authorization", "cookie", "proxy-authorization"]) headers.delete(name);
+    output.headers = headers;
+  }
+  const method = (input.method ?? "GET").toUpperCase();
+  if (status === 303 && method !== "HEAD" || (status === 301 || status === 302) && method === "POST") {
+    output.method = "GET";
+    delete output.body;
+    const headers = new Headers(output.headers);
+    headers.delete("content-length");
+    headers.delete("content-type");
+    output.headers = headers;
+  }
+  return output;
 }
 
 function ownErrorValue(error: unknown, key: "code" | "cause"): unknown {
@@ -117,6 +172,7 @@ export class ScopedHttp {
     consume: (response: Response, signal: AbortSignal) => Promise<T>,
     options: HttpRequestOptions = {},
   ): Promise<T> {
+    const redirects = redirectConfiguration(options.redirects);
     let started = false;
     const task = this.scope.run("http", async (scopeSignal) => {
       started = true;
@@ -145,7 +201,26 @@ export class ScopedHttp {
         if (cancellation) throw cancellation;
         timer = setTimeout(() => cancel("TIMEOUT"), timeoutMs);
         // Do not race cancellation against this promise: ignored signals must stay tracked.
-        response = await this.fetchImpl(url, { ...init, signal });
+        if (!redirects) {
+          response = await this.fetchImpl(url, { ...init, signal });
+        } else {
+          let current = allowedURL(url, undefined, redirects.allowed);
+          let request: RequestInit = {...init, redirect: "manual"};
+          let followed = 0;
+          while (true) {
+            response = await this.fetchImpl(current, {...request, redirect: "manual", signal});
+            if (![301, 302, 303, 307, 308].includes(response.status)) break;
+            const location = response.headers.get("location");
+            if (location === null) break;
+            if (followed >= redirects.maximum) throw new HttpError("TOO_MANY_REDIRECTS");
+            const next = allowedURL(location, current, redirects.allowed);
+            request = redirectedInit(current, next, response.status, request);
+            if (response.body && !response.body.locked) await response.body.cancel();
+            response = undefined;
+            current = next;
+            followed += 1;
+          }
+        }
         if (cancellation) throw cancellation;
         value = await consume(response, signal);
       } catch (error) {
