@@ -463,7 +463,7 @@ test("display name persists, escapes HTML, resets, and restricts changes to the 
   const context = {...f.context, storage: {json: () => ({read: async () => saved,
     update: async (fn: (s: typeof saved) => typeof saved) => { writes++; saved = fn(saved); return saved; }})}} as unknown as PluginContext;
   const help = createHelp(f.host, "42");
-  const message = {...f.message, senderId: "42", chatId: "42"};
+  const message = {...f.message, senderId: "42", chatId: "42", outgoing: false, saved: true};
   const run = (args: string[], target = message) => help.commands.help.handle({message: target, prefix: ".", command: "help", args}, context);
   await run(["name", "Cat <Bot> & Co"]);
   assert.equal(getBotName(), "Cat <Bot> & Co");
@@ -476,6 +476,7 @@ test("display name persists, escapes HTML, resets, and restricts changes to the 
   assert.equal(getBotName(), "Cat <Bot> & Co");
   await run(["name", "other"], {...message, chatId: "-1001"});
   await run(["name", "other"], {...message, senderId: "99"});
+  await run(["name", "other"], {...message, forwarded: true});
   await run(["name", "x".repeat(49)]);
   assert.equal(writes, 1);
   assert.equal(getBotName(), "Cat <Bot> & Co");

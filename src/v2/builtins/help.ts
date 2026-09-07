@@ -171,7 +171,7 @@ export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
         await context.telegram.edit(invocation.message, `当前显示名：${getBotName()}\n设置：${invocation.prefix}help name 名称\n恢复：${invocation.prefix}help name reset`);
         return;
       }
-      if (!ownerId || !invocation.message.outgoing || invocation.message.senderId !== ownerId || invocation.message.chatId !== ownerId) {
+      if (!ownerId || invocation.message.forwarded || invocation.message.senderId !== ownerId || invocation.message.chatId !== ownerId) {
         await context.telegram.edit(invocation.message, "请由账号本人在收藏夹设置显示名");
         return;
       }
