@@ -11,6 +11,10 @@ test('every inventoried module appears exactly once in the migration matrix', ()
   assert.equal(status.scope.entrypoints, status.scope.builtins + status.scope.extensions + status.scope.archived);
   assert.equal(status.modules.filter(module => module.productionPriority).length, 11);
   assert.equal(Object.values(status.counts).reduce((sum, count) => sum + count, 0), expected.length);
+  assert.ok(status.evidenceCounts.implementations >= status.evidenceCounts.contractTests);
+  assert.ok(status.evidenceCounts.contractTests >= status.evidenceCounts.hostTests);
+  assert.equal(status.evidenceCounts.liveVerified, status.counts['live-verified'] + status.counts.accepted);
+  assert.equal(status.evidenceCounts.accepted, status.counts.accepted);
 });
 
 test('offline evidence does not claim live or resource acceptance', () => {
@@ -31,4 +35,10 @@ test('existing V2 entries are visible without overstating acceptance', () => {
   assert.ok(annual.tests.some(file => file.endsWith('annualreport-v2.test.js')));
   assert.ok(annual.pending.some(item => item.includes('external')));
   assert.equal(status.modules.find(module => module.source === 'TeleBox-Plugins/warp/warp.ts').status, 'planned');
+});
+
+test('batch tests are attributed to every explicitly built plugin', () => {
+  const status = migrationStatus();
+  const captcha = status.modules.find(module => module.source === 'TeleBox-Plugins/pmcaptcha/pmcaptcha.ts');
+  assert.ok(captcha.tests.some(file => file.endsWith('monitoring-state-batch-v2.test.js')));
 });

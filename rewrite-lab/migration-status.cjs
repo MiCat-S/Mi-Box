@@ -8,6 +8,12 @@ const entries = report.sources.filter(source => !source.kind.endsWith('-support'
 const names = new Set(entries.map(entry => entry.file));
 const statuses = new Set(['planned', 'in-progress', 'offline-verified', 'live-verified', 'accepted']);
 
+function testReferencesPlugin(text, id) {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:buildPlugin|built|build|loadPlugin)\\(\\s*['\"]${escaped}['\"]`).test(text) ||
+    text.includes(`${id}/v2.ts`) || text.includes(`/${id}/v2`);
+}
+
 function inferredEvidence(source) {
   const match = source.file.match(/^TeleBox-Plugins\/([^/]+)\/\1\.ts$/);
   if (!match) return {};
@@ -18,8 +24,7 @@ function inferredEvidence(source) {
   const tests = fs.readdirSync(scripts).filter(file => /-v2\.test\.js$/.test(file)).filter(file => {
     if (file === `${id.replaceAll('_', '-')}-v2.test.js`) return true;
     const text = fs.readFileSync(path.join(scripts, file), 'utf8');
-    return text.includes(`${id}/v2.ts`) || text.includes(`/${id}/v2`) ||
-      text.includes(`buildPlugin('${id}'`) || text.includes(`buildPlugin("${id}"`);
+    return testReferencesPlugin(text, id);
   }).map(file => `TeleBox-Plugins/scripts/${file}`).sort();
   return {
     implementation, status: 'in-progress', tests,
@@ -46,13 +51,24 @@ function migrationStatus() {
     ...inferredEvidence(source),
     ...registry.entries[source.file],
   }));
-  return {
+  const evidence = {
     schemaVersion: 1, baseline: registry.baseline, observedRevisions: report.revisions,
     scope: {entrypoints: modules.length, builtins: report.counts.builtins, extensions: report.counts.extensions, archived: report.counts.archivedExtensions},
     counts: Object.fromEntries([...statuses].map(status => [status, modules.filter(item => item.status === status).length])),
     limitation: 'Registry tracks evidence and pending acceptance; file presence is not proof that a test or external service passed.',
     modules,
   };
+  evidence.evidenceCounts = {
+    implementations: modules.filter(item => item.implementation).length,
+    contractTests: modules.filter(item => item.tests.length).length,
+    hostTests: modules.filter(item => item.tests.some(file => {
+      const text = fs.readFileSync(path.join(workspace, file), 'utf8');
+      return text.includes('PluginHost');
+    })).length,
+    liveVerified: modules.filter(item => item.status === 'live-verified' || item.status === 'accepted').length,
+    accepted: modules.filter(item => item.status === 'accepted').length,
+  };
+  return evidence;
 }
 
 if (require.main === module) process.stdout.write(JSON.stringify(migrationStatus(), null, 2) + '\n');
