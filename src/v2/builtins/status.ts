@@ -1,30 +1,114 @@
 import os from "node:os";
+import {getBotName} from "../branding";
 import {definePlugin} from "../sdk";
+import {bold, code, concat, field, text, type Html} from "../ui/text";
+
+export interface ProcessMemorySnapshot {
+  readonly rss: number;
+  readonly heapUsed: number;
+  readonly heapTotal: number;
+  readonly external: number;
+}
+
+export interface SystemMemorySnapshot {
+  readonly total: number;
+  readonly free: number;
+}
+
+export interface StatusSnapshot {
+  readonly uptime: number;
+  readonly nodeVersion: string;
+  readonly platform: string;
+  readonly arch: string;
+  readonly pid: number;
+  readonly processMemory: ProcessMemorySnapshot;
+  readonly systemMemory: SystemMemorySnapshot;
+  readonly loadAverage: readonly number[];
+}
+
+export function collectStatus(): StatusSnapshot {
+  const memory = process.memoryUsage();
+  return Object.freeze({
+    uptime: Math.floor(process.uptime()),
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    pid: process.pid,
+    processMemory: Object.freeze({
+      rss: memory.rss,
+      heapUsed: memory.heapUsed,
+      heapTotal: memory.heapTotal,
+      external: memory.external,
+    }),
+    systemMemory: Object.freeze({total: os.totalmem(), free: os.freemem()}),
+    loadAverage: Object.freeze([...os.loadavg()]),
+  });
+}
+
+/** Keep all memory rows in the same unit so snapshots are easy to compare. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "不可用";
+  return `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
+}
+
+export function formatDuration(seconds: number): string {
+  const total = Number.isFinite(seconds) && seconds >= 0 ? Math.floor(seconds) : 0;
+  if (total < 60) return `${total}秒`;
+  const minutes = Math.floor(total / 60);
+  const remainingSeconds = total % 60;
+  if (minutes < 60) return `${minutes}分钟${remainingSeconds ? ` ${remainingSeconds}秒` : ""}`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return `${hours}小时${remainingMinutes ? ` ${remainingMinutes}分钟` : ""}`;
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return `${days}天${remainingHours ? ` ${remainingHours}小时` : ""}${remainingMinutes ? ` ${remainingMinutes}分钟` : ""}`;
+}
+
+function lines(...values: readonly Html[]): Html {
+  const result: Html[] = [];
+  values.forEach((value, index) => {
+    if (index) result.push(text("\n"));
+    result.push(value);
+  });
+  return concat(...result);
+}
+
+export function renderStatus(snapshot: StatusSnapshot): Html {
+  const processMemory = snapshot.processMemory;
+  const systemMemory = snapshot.systemMemory;
+  const used = Math.max(0, systemMemory.total - systemMemory.free);
+  const load = snapshot.loadAverage.slice(0, 3).map(value =>
+    Number.isFinite(value) ? value.toFixed(2) : "不可用").join(" / ");
+  return concat(
+    bold(`${getBotName()} 状态`), text("\n\n"),
+    lines(
+      bold("运行环境"),
+      field("运行时间", formatDuration(snapshot.uptime)),
+      field("Node", snapshot.nodeVersion),
+      field("平台", `${snapshot.platform}/${snapshot.arch}`),
+      field("PID", snapshot.pid),
+    ),
+    text("\n\n"),
+    lines(
+      bold("进程内存"),
+      field("RSS", formatBytes(processMemory.rss)),
+      field("JS Heap", `${formatBytes(processMemory.heapUsed)} / ${formatBytes(processMemory.heapTotal)}`),
+      field("External", formatBytes(processMemory.external)),
+    ),
+    text("\n\n"),
+    lines(
+      bold("系统资源"),
+      field("系统内存", `${formatBytes(used)} / ${formatBytes(systemMemory.total)}（剩余 ${formatBytes(systemMemory.free)}）`),
+      concat(code("负载（1 / 5 / 15 分钟）"), text(": "), code(load)),
+    ),
+  );
+}
 
 export default function createStatus() {
-  return definePlugin({apiVersion: 1, id: "status", description: "查看 Mi Box 运行状态",
+  return definePlugin({apiVersion: 1, id: "status", description: "查看运行状态",
     commands: {status: {description: "查看运行状态", async handle(invocation, ctx) {
-      const memory = process.memoryUsage();
-      const uptime = Math.floor(process.uptime());
-      const formatUptime = (seconds: number) => {
-        const days = Math.floor(seconds / 86400); seconds %= 86400;
-        const hours = Math.floor(seconds / 3600); seconds %= 3600;
-        const minutes = Math.floor(seconds / 60);
-        return `${days}天 ${hours}小时 ${minutes}分钟`;
-      };
-      const total = os.totalmem() / 1048576;
-      const free = os.freemem() / 1048576;
-      const load = os.loadavg().map(value => value.toFixed(2)).join(" / ");
-      const text = `<b>Mi Box 状态</b>\n\n` +
-        `运行时间: <code>${formatUptime(uptime)}</code>\n` +
-        `Node: <code>${process.version}</code>　平台: <code>${process.platform}/${process.arch}</code>\n` +
-        `PID: <code>${process.pid}</code>　线程: <code>${process.versions.uv ? "Node" : "未知"}</code>\n` +
-        `进程 RSS: <code>${(memory.rss / 1048576).toFixed(2)} MB</code>\n` +
-        `JS Heap: <code>${(memory.heapUsed / 1048576).toFixed(2)} / ${(memory.heapTotal / 1048576).toFixed(2)} MB</code>\n` +
-        `External: <code>${(memory.external / 1048576).toFixed(2)} MB</code>\n\n` +
-        `系统内存: <code>${(total - free).toFixed(2)} / ${total.toFixed(2)} MB</code>\n` +
-        `系统负载: <code>${load}</code>`;
-      await ctx.telegram.edit(invocation.message, text, {parseMode: "html"});
+      await ctx.telegram.edit(invocation.message, renderStatus(collectStatus()), {parseMode: "html", linkPreview: false});
     }}}
   });
 }

@@ -1,24 +1,12 @@
-import {brandText, getBotName, setBotName} from "../branding";
-import type { PluginHost } from "../host";
-import { definePlugin, type CommandInvocation, type PluginContext, type PluginDefinition } from "../sdk";
+import {getBotName, setBotName} from "../branding";
+import type {PluginHost} from "../host";
+import {definePlugin, type CommandInvocation, type PluginContext, type PluginDefinition} from "../sdk";
+import {bold, code, command, concat, link, text, type Html} from "../ui/text";
+import {renderDocument, richText, section, type DocumentOptions, type Section} from "../ui/document";
 
 type HelpHost = Pick<PluginHost, "listCommands" | "listPlugins" | "configuration">;
 type PluginInfo = ReturnType<HelpHost["listPlugins"]>[number];
-interface Block { html: string; entities: number; }
-
-// Raw HTML UTF-16 length is conservative relative to Telegram's decoded length.
-const MAX_HTML_LENGTH = 3_500;
-const MAX_ENTITIES = 90;
-const supportedTags = new Set([
-  "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "a",
-  "code", "pre", "blockquote", "span", "tg-spoiler", "spoiler", "tg-emoji", "tg-date",
-]);
-
-function escape(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function code(value: string): string { return `<code>${escape(value)}</code>`; }
+type CatalogCommand = ReturnType<HelpHost["listCommands"]>[number];
 
 const pluginIcons: Readonly<Record<string, string>> = {
   ai: "🤖", da: "🛡️", dc: "🌐", dme: "🗑️", gt: "🌍", ids: "🪪",
@@ -26,113 +14,23 @@ const pluginIcons: Readonly<Record<string, string>> = {
   memory: "🧠", ping: "🏓", status: "📊", env: "⚙️", alias: "🔗",
   prefix: "📌", loglevel: "🔊", help: "❔",
 };
-function pluginTitle(id: string): string { return `${pluginIcons[id.toLowerCase()] ?? "🧩"} ${escape(id)}`; }
 
-function plainBlocks(text: string): Block[] {
-  const result: Block[] = [];
-  let html = "";
-  const budget = MAX_HTML_LENGTH - "<pre></pre>".length;
-  // Iterate code points so astral characters and multi-byte prefixes stay intact.
-  for (const character of text) {
-    const escaped = escape(character);
-    if (html.length + escaped.length > budget) {
-      result.push({ html: `<pre>${html}</pre>`, entities: 1 });
-      html = "";
-    }
-    html += escaped;
-  }
-  // A single pre entity also prevents URL/command auto-detection in fallback data.
-  if (html.trim()) result.push({ html: `<pre>${html}</pre>`, entities: 1 });
-  return result;
-}
-
-async function formatter() {
-  const { parseDocument, DomUtils } = await import("htmlparser2");
-  type HtmlNode = ReturnType<typeof parseDocument>["children"][number];
-  const serialize = (node: HtmlNode): string => DomUtils.getOuterHTML(node, { encodeEntities: "utf8" });
-
-  const normalize = (source: string): Block[] => {
-    if (!source.trim()) return [];
-    const document = parseDocument(source);
-    const stack: HtmlNode[] = [...document.children];
-    let entities = 0;
-    let unsupported = false;
-    const links = new Set<string>();
-    while (stack.length) {
-      const node = stack.pop()!;
-      if ("attribs" in node) {
-        entities += 1;
-        if (!supportedTags.has(node.name)) unsupported = true;
-        if (node.name === "a" && node.attribs.href) {
-          links.add(node.attribs.href);
-          try {
-            if (!["http:", "https:", "tg:", "mailto:"].includes(new URL(node.attribs.href).protocol)) unsupported = true;
-          } catch { unsupported = true; }
-        }
-      }
-      if ("children" in node) stack.push(...node.children);
-    }
-    if (unsupported) {
-      return [{ html: "此段包含不支持的格式，以下按文本显示。", entities: 0 }, ...plainBlocks(source)];
-    }
-    const html = document.children.map(serialize).join("");
-    if (html.length <= MAX_HTML_LENGTH && entities <= MAX_ENTITIES) return [{ html, entities }];
-    let text = DomUtils.textContent(document);
-    const addresses = [...links];
-    if (addresses.length) text += `\n链接地址：\n${addresses.join("\n")}`;
-    return [{ html: "此段超出单条消息的长度或格式数量预算，以下以纯文本分段显示。", entities: 0 }, ...plainBlocks(text)];
-  };
-
-  const description = (source: string): Block[] => {
-    const document = parseDocument(source);
-    const result: Block[] = [];
-    let current = "";
-    // Newlines outside tags are block boundaries; formatted elements stay whole.
-    for (const node of document.children) {
-      if (node.type !== "text") {
-        current += serialize(node);
-        continue;
-      }
-      const lines = node.data.split("\n");
-      current += escape(lines[0]);
-      for (const line of lines.slice(1)) {
-        result.push(...normalize(current));
-        current = escape(line);
-      }
-    }
-    result.push(...normalize(current));
-    return result;
-  };
-  return { normalize, description };
-}
-
-function pages(blocks: Block[]): string[] {
-  const result: string[] = [];
-  let text = "";
-  let entities = 0;
-  for (const block of blocks) {
-    if (!block.html.trim()) continue;
-    if (text && (text.length + 1 + block.html.length > MAX_HTML_LENGTH || entities + block.entities > MAX_ENTITIES)) {
-      result.push(text);
-      text = "";
-      entities = 0;
-    }
-    text += `${text ? "\n" : ""}${block.html}`;
-    entities += block.entities;
-  }
-  if (text) result.push(text);
-  return result;
-}
-
-function aliasesFor(command: string, aliases: Readonly<Record<string, string>>): string[] {
+function aliasesFor(commandName: string, aliases: Readonly<Record<string, string>>): string[] {
   return Object.entries(aliases)
-    .filter(([, expansion]) => expansion.trim().split(/\s+/)[0]?.toLowerCase() === command.toLowerCase())
-    .map(([alias]) => alias).sort();
+    .filter(([, expansion]) => expansion.trim().split(/\s+/)[0]?.toLowerCase() === commandName.toLowerCase())
+    .map(([alias]) => alias)
+    .sort();
 }
 
-function commandLine(command: string, prefix: string, aliases: Readonly<Record<string, string>>): string {
-  const names = aliasesFor(command, aliases);
-  return code(prefix + command) + (names.length ? `（别名：${names.map((name) => code(prefix + name)).join("、")}）` : "");
+function commandLine(commandName: string, prefix: string, aliases: Readonly<Record<string, string>>): Html {
+  const names = aliasesFor(commandName, aliases);
+  if (!names.length) return command(prefix, commandName);
+  const aliasesHtml: Html[] = [];
+  names.forEach((name, index) => {
+    if (index) aliasesHtml.push(text("、"));
+    aliasesHtml.push(command(prefix, name));
+  });
+  return concat(command(prefix, commandName), text("（别名："), ...aliasesHtml, text("）"));
 }
 
 function resolve(
@@ -140,26 +38,145 @@ function resolve(
   plugins: PluginInfo[],
   prefixes: readonly string[],
   aliases: Readonly<Record<string, string>>,
-): { plugin: PluginInfo; usage?: string } | undefined {
-  const prefix = [...prefixes].sort((a, b) => b.length - a.length).find((candidate) => query.startsWith(candidate));
+): {plugin: PluginInfo; usage?: string} | undefined {
+  const prefix = [...prefixes].sort((a, b) => b.length - a.length).find(candidate => query.startsWith(candidate));
   if (prefix) query = query.slice(prefix.length);
   const parts = query.trim().split(/\s+/).filter(Boolean);
   let alias: string | undefined;
-  for (let length = parts.length; length > 0; length--) {
+  for (let length = parts.length; length > 0; length -= 1) {
     const candidate = parts.slice(0, length).join(" ");
     // Match host parsing: longer aliases win, but real commands own single tokens.
-    if (length === 1 && plugins.some((plugin) => plugin.commands.some((entry) => entry.name === candidate))) continue;
+    if (length === 1 && plugins.some(plugin => plugin.commands.some(entry => entry.name === candidate))) continue;
     if (Object.hasOwn(aliases, candidate) && aliases[candidate]) {
       alias = candidate;
       break;
     }
   }
-  const command = (alias ? aliases[alias] : query).trim().split(/\s+/)[0].toLowerCase();
-  const owner = plugins.find((plugin) => plugin.commands.some((entry) => entry.name.toLowerCase() === command));
-  if (owner) return { plugin: owner, usage: alias ?? owner.commands.find((entry) => entry.name.toLowerCase() === command)!.name };
+  const commandName = (alias ? aliases[alias] : query).trim().split(/\s+/)[0].toLowerCase();
+  const owner = plugins.find(plugin => plugin.commands.some(entry => entry.name.toLowerCase() === commandName));
+  if (owner) return {plugin: owner, usage: alias ?? owner.commands.find(entry => entry.name.toLowerCase() === commandName)!.name};
   if (alias) return undefined;
-  const plugin = plugins.find((entry) => entry.id.toLowerCase() === query.toLowerCase());
-  return plugin && { plugin, usage: plugin.commands[0]?.name };
+  const plugin = plugins.find(entry => entry.id.toLowerCase() === query.toLowerCase());
+  return plugin && {plugin, usage: plugin.commands[0]?.name};
+}
+
+interface OverviewInput {
+  readonly configuration: ReturnType<HelpHost["configuration"]>;
+  readonly commands: readonly CatalogCommand[];
+  readonly plugins: readonly PluginInfo[];
+}
+
+export async function buildOverview(input: OverviewInput): Promise<DocumentOptions> {
+  const {configuration, commands, plugins} = input;
+  const prefix = configuration.prefixes[0] ?? ".";
+  const aliases = configuration.aliases;
+  const groups: ReadonlyArray<[string, ReadonlySet<string>]> = [
+    ["常用命令", new Set(["agent", "ai", "gt", "memory", "ping", "status", "sysinfo", "tpm", "update"])],
+    ["系统工具", new Set(["alias", "autofix", "bf", "env", "exec", "help", "loglevel", "prefix", "restart", "sudo", "version"])],
+  ];
+  const listed = new Set<string>();
+  const sections: Section[] = [];
+  const addCommands = (names: readonly string[]): Html[] => {
+    const lines: Html[] = [];
+    let row: Html[] = [];
+    let commandCount = 0;
+    let width = 0;
+    const flush = (): void => {
+      if (row.length) lines.push(concat(...row));
+      row = [];
+      commandCount = 0;
+      width = 0;
+    };
+    for (const name of [...new Set(names)].sort()) {
+      if (listed.has(name)) continue;
+      listed.add(name);
+      const aliasNames = aliasesFor(name, aliases);
+      const line = commandLine(name, prefix, aliases);
+      const length = prefix.length + name.length;
+      if (aliasNames.length) {
+        flush();
+        lines.push(line);
+        continue;
+      }
+      if (commandCount >= 4 || width + length + 2 > 36) flush();
+      if (commandCount) row.push(text("  "));
+      row.push(line);
+      commandCount += 1;
+      width += length + 2;
+    }
+    flush();
+    return lines;
+  };
+
+  for (const [heading, ids] of groups) {
+    const names = plugins
+      .filter(plugin => ids.has(plugin.id.toLowerCase()))
+      .flatMap(plugin => plugin.commands)
+      .map(entry => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+    const lines = addCommands(names);
+    if (lines.length) sections.push(section(heading, lines));
+  }
+  const ungrouped = commands
+    .filter(entry => !listed.has(entry.name))
+    .map(entry => entry.name)
+    .sort((left, right) => left.localeCompare(right));
+  const extensionLines = addCommands(ungrouped);
+  if (extensionLines.length) sections.push(section("扩展插件", extensionLines));
+  if (!listed.size && !ungrouped.length) sections.push(section([text("暂无可用命令")]));
+  const jobs = plugins.filter(plugin => !plugin.commands.length).map(plugin => code(plugin.id));
+  if (jobs.length) sections.push(section("定时模块", jobs));
+
+  const footer: Html[] = [
+    concat(text("发送 "), command(prefix, "help", "<命令>"), text(" 查看详细说明")),
+  ];
+  if (commands.some(entry => entry.name === "tpm")) {
+    footer.push(concat(command(prefix, "tpm", "search"), text(" 显示远程插件列表")));
+  }
+  footer.push(concat(
+    link("https://github.com/MiCat-S/Mi-Box", `${getBotName()} 仓库`), text(" | "),
+    link("https://github.com/MiCat-S/Mi-Box-Plugins", "插件仓库"),
+  ));
+  return {
+    title: `${getBotName()} 控制台`,
+    subtitle: `${commands.length} 个命令 · ${plugins.length} 个模块\n前缀 ${configuration.prefixes.map(value => value).join(" · ")}`,
+    sections,
+    footer,
+  };
+}
+
+export async function buildPluginDetails(
+  plugin: PluginInfo,
+  prefix: string,
+  aliases: Readonly<Record<string, string>>,
+  usage?: string,
+): Promise<DocumentOptions> {
+  const commandLines: Html[] = [];
+  for (const entry of [...plugin.commands].sort((left, right) => left.name.localeCompare(right.name))) {
+    commandLines.push(commandLine(entry.name, prefix, aliases));
+    if (entry.description && entry.description !== plugin.description) commandLines.push(...await richText(entry.description));
+  }
+  if (!commandLines.length) commandLines.push(text("无可调用命令"));
+
+  const sections: Section[] = [
+    section("功能说明", await richText(plugin.renderHelp?.(prefix) ?? (plugin.description || "暂无描述信息"))),
+    section("可用命令", commandLines),
+  ];
+  if (usage) sections.push(section(undefined, [concat(bold("使用方法："), code(` ${prefix}${usage} [参数]`))]));
+  if (plugin.jobs.length) {
+    const jobs: Html[] = [];
+    for (const job of plugin.jobs) {
+      jobs.push(concat(code(job.name), text(" "), code(`(${job.cron})`)));
+      jobs.push(...await richText(job.description || "暂无描述信息"));
+    }
+    sections.push(section("定时任务", jobs));
+  }
+  return {
+    title: `${pluginIcons[plugin.id.toLowerCase()] ?? "🧩"} ${plugin.id} 帮助`,
+    subtitle: `${plugin.commands.length} 个命令`,
+    sections,
+    footer: await richText(`使用 ${code(`${prefix}help`)} 查看所有命令`),
+  };
 }
 
 export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
@@ -185,117 +202,42 @@ export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
       await context.telegram.edit(invocation.message, `显示名已设为：${getBotName()}`);
       return;
     }
-    let output: string[];
+
+    let output: readonly string[];
     try {
-      const format = await formatter();
       context.signal.throwIfAborted();
       const configuration = host.configuration();
-      const prefix = configuration.prefixes[0] ?? invocation.prefix;
-      const aliases = configuration.aliases;
       const commands = host.listCommands();
       const plugins = host.listPlugins();
-      const blocks: Block[] = [];
-      const add = (html: string): void => { blocks.push(...format.normalize(html)); };
       const query = invocation.args.join(" ").trim();
       if (!query) {
-        add(brandText(`<b>MiBot 控制台</b>  <code>${commands.length} 个命令</code>`));
-        add(`前缀 ${configuration.prefixes.map(code).join(" · ")}`);
-        const groups: ReadonlyArray<[string, ReadonlySet<string>]> = [
-          ["常用命令", new Set(["agent", "ai", "gt", "memory", "ping", "status", "sysinfo", "tpm", "update"])],
-          ["系统工具", new Set(["alias", "autofix", "bf", "env", "exec", "help", "loglevel", "prefix", "restart", "sudo", "version"])],
-        ];
-        const listed = new Set<string>();
-        const addCommands = (names: string[]): void => {
-          let row: string[] = [];
-          let width = 0;
-          const flush = (): void => {
-            if (row.length) add(row.join("  "));
-            row = [];
-            width = 0;
-          };
-          for (const name of [...new Set(names)].sort()) {
-            if (listed.has(name)) continue;
-            listed.add(name);
-            const line = commandLine(name, prefix, aliases);
-            const length = prefix.length + name.length;
-            if (aliasesFor(name, aliases).length) {
-              flush();
-              add(line);
-              continue;
-            }
-            if (row.length >= 4 || width + length + 2 > 36) flush();
-            row.push(line);
-            width += length + 2;
-          }
-          flush();
-        };
-        for (const [title, ids] of groups) {
-          const entries = plugins
-            .filter((plugin) => ids.has(plugin.id.toLowerCase()))
-            .flatMap((plugin) => plugin.commands)
-            .sort((a, b) => a.name.localeCompare(b.name));
-          if (!entries.length) continue;
-          add(`<b>${title}</b>`);
-          addCommands(entries.map((entry) => entry.name));
-        }
-        const ungrouped = commands
-          .filter((entry) => !listed.has(entry.name))
-          .sort((a, b) => a.name.localeCompare(b.name));
-        if (!listed.size && !ungrouped.length) add("暂无可用命令");
-        if (ungrouped.length) {
-          add("<b>扩展插件</b>");
-          addCommands(ungrouped.map((entry) => entry.name));
-        }
-        const jobOnly = plugins.filter((plugin) => !plugin.commands.length);
-        if (jobOnly.length) {
-          add("<b>定时模块</b>");
-          for (const plugin of jobOnly) add(code(plugin.id));
-        }
-        add(`发送 ${code(prefix + "help <命令>")} 查看详细说明`);
-        if (commands.some((entry) => entry.name === "tpm")) {
-          add(`${code(prefix + "tpm search")} 显示远程插件列表`);
-        }
-        add(`<a href="https://github.com/MiCat-S/Mi-Box">${escape(getBotName())} 仓库</a> | <a href="https://github.com/MiCat-S/Mi-Box-Plugins">插件仓库</a>`);
-        output = pages(blocks);
+        output = await renderDocument(await buildOverview({configuration, commands, plugins}));
       } else {
-        const target = resolve(query, plugins, configuration.prefixes, aliases);
+        const target = resolve(query, [...plugins], configuration.prefixes, configuration.aliases);
         if (!target) {
-          add(`未找到命令或模块 ${code(query)}`);
-          add(`使用 ${code(prefix + "help")} 查看所有命令`);
+          output = await renderDocument({
+            title: `${getBotName()} 帮助`,
+            sections: [section(undefined, [text(`未找到命令或模块 ${query}`), concat(text("使用 "), command(invocation.prefix, "help"), text(" 查看所有命令"))])],
+          });
         } else {
-          const { plugin, usage } = target;
-          add(`<b>${pluginTitle(plugin.id)} 帮助</b>　<code>${plugin.commands.length} 个命令</code>`);
-          add("━━━━━━━━━━━━");
-          add("<b>功能说明</b>");
-          blocks.push(...format.description(plugin.description || "暂无描述信息"));
-          add("<b>可用命令</b>");
-          if (!plugin.commands.length) add("无可调用命令");
-          for (const entry of [...plugin.commands].sort((a, b) => a.name.localeCompare(b.name))) {
-            add(commandLine(entry.name, prefix, aliases));
-            if (entry.description && entry.description !== plugin.description) blocks.push(...format.description(entry.description));
-          }
-          if (usage) add(`<b>使用方法：</b> ${code(prefix + usage + " [参数]")}`);
-          if (plugin.jobs.length) {
-            add("<b>定时任务</b>");
-            for (const job of plugin.jobs) {
-              add(`${code(job.name)} ${code("(" + job.cron + ")")}`);
-              blocks.push(...format.description(job.description || "暂无描述信息"));
-            }
-          }
-          add(`使用 ${code(prefix + "help")} 查看所有命令`);
+          output = await renderDocument(await buildPluginDetails(
+            target.plugin,
+            invocation.prefix,
+            configuration.aliases,
+            target.usage,
+          ));
         }
-        output = pages(blocks);
       }
     } catch {
       context.signal.throwIfAborted();
       context.log.error("help.failed");
       output = ["帮助暂时不可用，请稍后重试。"];
     }
-    for (const [index, text] of output.entries()) {
+    for (const [index, page] of output.entries()) {
       context.signal.throwIfAborted();
-      const options = { parseMode: "html" as const, linkPreview: false };
-      if (index === 0) await context.telegram.edit(invocation.message, text, options);
-      else await context.telegram.reply(invocation.message, text, options);
+      const options = {parseMode: "html" as const, linkPreview: false};
+      if (index === 0) await context.telegram.edit(invocation.message, page, options);
+      else await context.telegram.reply(invocation.message, page, options);
     }
   };
   return definePlugin({
@@ -307,8 +249,8 @@ export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
     },
     description: "查看帮助；使用 help name 名称 设置显示名，help name reset 恢复默认",
     commands: {
-      help: { description: "查看命令或模块帮助", handle },
-      h: { description: "查看命令或模块帮助", handle },
+      help: {description: "查看命令或模块帮助", handle},
+      h: {description: "查看命令或模块帮助", handle},
     },
   });
 }

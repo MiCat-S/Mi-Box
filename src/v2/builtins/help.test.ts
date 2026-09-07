@@ -88,6 +88,26 @@ function validateMessages(messages: Sent[]): void {
 
 function visible(messages: Sent[]): string { return messages.map((entry) => HTMLParser.parse(entry.text)[0]).join("\n"); }
 
+test("host exposes dynamic plugin help using the invoking secondary prefix", async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "mibot-help-prefix-")));
+  const output: string[] = [];
+  const host = new PluginHost({storageRoot: root, logger: {info() {}, error() {}},
+    telegram: {async edit(_message, text) {output.push(text);}, async reply(_message, text) {output.push(text);},
+      async invoke() {throw new Error("unexpected");}, async getReply() {return undefined;},
+      async withClient() {throw new Error("unexpected");}}});
+  t.after(async () => {await host.shutdown(1000); await fs.rm(root, {recursive: true, force: true});});
+  await host.load(createHelp(host));
+  await host.load(definePlugin({apiVersion: 1, id: "example", description: "static summary",
+    renderHelp: prefix => `<code>${prefix}example BTC</code>`,
+    commands: {example: {description: "example command", handle() {}}}}));
+  host.replacePrefixes([".", "!"]);
+  assert.equal(await host.dispatchPrimary({id: 1, chatId: "1", outgoing: true, text: "!help example"}), true);
+  const content = output.map(value => HTMLParser.parse(value)[0]).join("\n");
+  assert.match(content, /!example BTC/);
+  assert.match(content, /!help/);
+  assert.doesNotMatch(content, /\.example|\.help/);
+});
+
 test("live host installation update and unload immediately change help and details", async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "mibot-help-")));
   const output: string[] = [];
@@ -149,6 +169,8 @@ test("main help shows single commands, grouped modules, dynamic prefixes and rep
   for (const entry of messages) assert.equal(entry.message, f.message);
 });
 
+
+
 test("production-sized rich-text catalog fits one compact message", async (t) => {
   const ids = "agent ai alias autofix bf da dc dme env exec gt ids ip leech loglevel memory nodeseek ping prefix rate re restart status sudo sum sure sysinfo tpm update yvlu".split(" ");
   const entries = [...ids.map((id) => plugin(id)), plugin("help", ["h", "help"]), plugin("version", ["ver", "version"])];
@@ -158,7 +180,7 @@ test("production-sized rich-text catalog fits one compact message", async (t) =>
   const text = visible(messages);
   assert.equal(messages.length, 1, "the complete catalog edits only the invoking message");
   assert.match(text, /34 个命令/);
-  assert.ok(text.split("\n").length <= 19, text);
+  assert.ok(text.split("\n").length <= 23, text);
   assert.ok(text.length < 650, text);
   assert.ok(messages[0].text.includes("<b>常用命令</b>"));
   assert.ok(messages[0].text.includes("<code>.agent</code>  <code>.ai</code>"));

@@ -3,6 +3,14 @@ import {randomUUID} from "node:crypto";
 import {definePlugin, type PluginContext} from "../sdk";
 import {isOwner} from "../permissions";
 
+const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
+const escapeHtml = (value: string): string => value
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
 type Receipt = {ownerId: string; chatId: string; messageId: number; requestedAt: number; bootId: string};
 type RestartState = {pending: Receipt | null};
 
@@ -22,9 +30,9 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
         const value = await ctx.processes.run("/usr/bin/systemctl",
           ["show", "--value", `-p`, field, "mibot.service"],
           {timeoutMs: 1500, maxOutputBytes: 600});
-        rows.push(`${field}: ${value.stdout.toString("utf8").trim() || "unknown"}`);
+        rows.push(`${escapeHtml(field)}: ${escapeHtml(value.stdout.toString("utf8").trim() || "unknown")}`);
       } catch {
-        rows.push(`${field}: unavailable`);
+        rows.push(`${escapeHtml(field)}: unavailable`);
       }
     }
     return rows.join("<br>");
@@ -55,7 +63,7 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
       const receipt: Receipt = {ownerId, chatId: invocation.message.chatId, messageId: invocation.message.id,
         requestedAt: Date.now(), bootId};
       try {
-        await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 重启</b>\n正在提交重启请求…"), {parseMode: "html"});
+        await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 重启</b>\n正在提交重启请求…"), htmlOptions);
         ctx.signal.throwIfAborted();
         await store(ctx).update(() => ({pending: receipt}));
       } catch (error) {
@@ -70,7 +78,7 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
           await clear(ctx, receipt);
           const status = await readServiceStatus(ctx);
           await ctx.telegram.edit(invocation.message, `服务重启命令执行失败。\n状态：${status}\n` +
-            `${processOwnerHint()}\n\n可执行 <code>systemctl status mibot.service --no-pager</code> 查看详情。`, {parseMode: "html"});
+            `${escapeHtml(processOwnerHint())}\n\n可执行 <code>systemctl status mibot.service --no-pager</code> 查看详情。`, htmlOptions);
         }
       }
     },},},
@@ -89,7 +97,7 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
         return;
       }
       await ctx.telegram.edit({id: pending.messageId, chatId: pending.chatId, text: "", outgoing: true},
-        brandText("<b>MiBot 重启成功</b>\n服务已就绪"), {parseMode: "html"});
+        brandText("<b>MiBot 重启成功</b>\n服务已就绪"), htmlOptions);
       await clear(ctx, pending);
     } catch {
       if (!ctx.signal.aborted) ctx.log.error("restart.receipt_failed");

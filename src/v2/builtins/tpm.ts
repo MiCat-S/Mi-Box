@@ -1,8 +1,43 @@
 import path from "node:path";
+import {getBotName} from "../branding";
 import {definePlugin, type PluginContext} from "../sdk";
 import type {PluginHost} from "../host";
 import type {PluginReleases} from "../releases";
 import {isOwner} from "../permissions";
+import {code, command, concat, text, type Html} from "../ui/text";
+import {renderDocument, section} from "../ui/document";
+import {renderFeedback} from "../ui/feedback";
+
+const PAGE_SIZE = 24;
+const htmlOptions = {parseMode: "html", linkPreview: false} as const;
+
+async function listView(
+  ids: readonly string[],
+  title: string,
+  prefix: string,
+  hint: string,
+  query?: string,
+): Promise<readonly string[]> {
+  const sorted = [...new Set(ids)].sort();
+  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const pages: Html[][] = [];
+  for (let page = 0; page < pageCount; page += 1) {
+    const values = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+    pages.push(values.length ? values.map(id => concat(text("• "), code(id))) : [text("没有匹配结果")]);
+  }
+  const output = (await Promise.all(pages.map(lines => renderDocument({
+    title: `${getBotName()} 插件管理`,
+    subtitle: `${title}${query !== undefined ? ` · 搜索：${query || "全部"}` : ""} · ${sorted.length} 个`,
+    sections: [section(undefined, lines)],
+    footer: [
+      text(hint),
+      concat(text("用法："), command(prefix, "tpm", title === "已安装扩展" ? "search [关键词]" : "install 插件名")),
+    ],
+  })))).flat();
+  // The renderer caps HTML at 3500 units, leaving room below Telegram's
+  // 4096-unit limit for the physical page number without another split.
+  return output.map((page, index) => `${page}\n${index + 1}/${output.length} 页`);
+}
 
 export default function createTpm(host: PluginHost, releases: PluginReleases, root: string, ownerId: string) {
   let busy = false;
@@ -17,7 +52,13 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       const sub = raw.toLowerCase();
       if (sub === "list" || sub === "ls") {
         const ids = releases.snapshot().generations.filter(item => item.state === "active").map(item => item.id);
-        await ctx.telegram.edit(invocation.message, `已安装扩展：${ids.join("、") || "无"}\n默认模块不计入扩展列表`);
+        const output = await listView(ids, "已安装扩展", invocation.prefix,
+          "默认模块不计入扩展列表", undefined);
+        for (const [index, page] of output.entries()) {
+          ctx.signal.throwIfAborted();
+          if (!index) await ctx.telegram.edit(invocation.message, page, htmlOptions);
+          else await ctx.telegram.reply(invocation.message, page, htmlOptions);
+        }
         return;
       }
       if (!isOwner(invocation.message, ownerId)) {
@@ -34,15 +75,17 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       let stage = "repository";
       try {
         if (sub === "search" || sub === "s") {
-          await ctx.telegram.edit(invocation.message, "正在读取 V2 插件仓库…");
+          await ctx.telegram.edit(invocation.message, renderFeedback({state: "working", title: "正在读取 V2 插件仓库…"}), htmlOptions);
           const {ids} = await repository(ctx, "search");
-          const query = invocation.args.slice(1).join(" ").toLowerCase();
+          const query = invocation.args.slice(1).join(" ").trim().toLowerCase();
           const matches = (ids ?? []).filter(name => /^[a-z][a-z0-9_-]{0,63}$/.test(name) &&
             name.includes(query) && !["ai", "gt"].includes(name));
-          for (let start = 0; start < Math.max(matches.length, 1); start += 40) {
-            const text = `可安装扩展\n${matches.slice(start, start + 40).join(" · ") || "没有匹配结果"}`;
-            if (!start) await ctx.telegram.edit(invocation.message, text);
-            else await ctx.telegram.reply(invocation.message, text);
+          const output = await listView(matches, "可安装扩展", invocation.prefix,
+            "仓库结果仅包含允许安装的 V2 扩展", query);
+          for (const [index, page] of output.entries()) {
+            ctx.signal.throwIfAborted();
+            if (!index) await ctx.telegram.edit(invocation.message, page, htmlOptions);
+            else await ctx.telegram.reply(invocation.message, page, htmlOptions);
           }
           return;
         }
@@ -53,23 +96,38 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         if (sub === "remove" || sub === "rm") {
           stage = "unload";
           await releases.remove(id);
-          await ctx.telegram.edit(invocation.message, `${id} 已卸载，配置数据已保留`);
+          await ctx.telegram.edit(invocation.message, renderFeedback({
+            state: "success", title: "卸载完成", detail: `${id} · 配置数据已保留`,
+          }), htmlOptions);
         } else {
-          await ctx.telegram.edit(invocation.message, `正在下载并构建 ${id}…`);
+          await ctx.telegram.edit(invocation.message,
+            renderFeedback({state: "working", title: `正在下载并构建 ${id}…`}), htmlOptions);
           const candidate = await repository(ctx, "build", id);
           if (candidate.id !== id || !candidate.revision) throw new Error("Invalid candidate");
           stage = "activate";
           await releases.activate(id, candidate.revision);
-          await ctx.telegram.edit(invocation.message, `${id} 已${installed ? "更新" : "安装"}并加载`);
+          await ctx.telegram.edit(invocation.message, renderFeedback({
+            state: "success", title: `${installed ? "更新" : "安装"}完成`, detail: `${id} · 已加载`,
+          }), htmlOptions);
         }
       } catch (error) {
         const allowed = new Set(["STATE", "CONFLICT", "STOP", "ACTIVATE", "RESTORE", "SPAWN_FAILED",
           "EXIT_FAILED", "TIMED_OUT", "OUTPUT_LIMIT", "IO_FAILED", "CONTROL_FAILED", "CLOSED", "ABORTED"]);
         const value = error && typeof error === "object" && "code" in error ? error.code : undefined;
-        const code = typeof value === "string" && allowed.has(value) ? value : "UNKNOWN";
-        ctx.log.error("tpm.operation_failed", {stage, code});
-        if (!ctx.signal.aborted) await ctx.telegram.edit(invocation.message,
-          `插件操作失败：${stage} / ${code}\n可在服务器运行 node scripts/plugin-repository.cjs search 检查仓库访问`);
+        const errorCode = typeof value === "string" && allowed.has(value) ? value : "UNKNOWN";
+        ctx.log.error("tpm.operation_failed", {stage, code: errorCode});
+        if (!ctx.signal.aborted) await ctx.telegram.edit(invocation.message, renderFeedback({
+          state: "error",
+          title: "插件操作失败",
+          diagnostic: {
+            stage,
+            code: errorCode,
+            label: ({repository: "仓库访问", unload: "卸载", activate: "加载"} as Record<string, string>)[stage],
+          },
+          nextStep: stage === "repository"
+            ? "在服务器运行 node scripts/plugin-repository.cjs search 检查仓库访问"
+            : "请稍后重试或查看服务器日志",
+        }), htmlOptions);
       } finally {busy = false;}
     }}},
   });

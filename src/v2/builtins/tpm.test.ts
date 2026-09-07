@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {HTMLParser} from "teleproto/extensions/html.js";
 import createTpm from "./tpm";
 import {PluginHost} from "../host";
 import fs from "node:fs/promises";
@@ -31,6 +32,36 @@ function fixture() {
   }, ctx as unknown as PluginContext);
   return {run, edits, operations, generations, ctx, failures};
 }
+test("TPM preserves all renderer pages and numbers final messages for long searches", async () => {
+  const f = fixture();
+  const query = "&".repeat(700);
+  await f.run(["search", query]);
+  const pages = f.edits.slice(1);
+  assert.ok(pages.length > 1);
+  const visible = pages.map((page, index) => {
+    const [value, entities] = HTMLParser.parse(page);
+    assert.ok(value.length <= 4096);
+    assert.ok(entities.length <= 100);
+    assert.ok(value.endsWith(`${index + 1}/${pages.length} 页`));
+    return value;
+  }).join("\n");
+  assert.equal([...visible].filter(character => character === "&").join(""), query);
+  assert.match(visible, /没有匹配结果/);
+  assert.match(visible, /tpm install 插件名/);
+});
+
+test("TPM stops sending additional pages after cancellation", async () => {
+  const f = fixture();
+  const controller = new AbortController();
+  f.ctx.signal = controller.signal;
+  const original = f.ctx.telegram.edit;
+  f.ctx.telegram.edit = async (message, text) => {
+    await original(message, text);
+    if (f.edits.length === 2) controller.abort();
+  };
+  await f.run(["search", "&".repeat(700)]);
+  assert.equal(f.edits.length, 2);
+});
 test("TPM installs and removes an extension, and lists actual loaded selections", async () => {
   const f = fixture();
   await f.run(["install", "dig"]);
@@ -76,6 +107,50 @@ test("TPM repository search runs through the real host process limits", async t 
   const releases = {snapshot: () => ({generations: []})} as unknown as PluginReleases;
   await host.load(createTpm(host, releases, root, "1"));
   await host.dispatchPrimary({id: 1, chatId: "1", senderId: "1", outgoing: true, text: ".tpm search"});
-  assert.match(edits.at(-1)!, /dig · subinfo/);
+  assert.match(edits.at(-1)!, /dig/);
+  assert.match(edits.at(-1)!, /subinfo/);
   assert.doesNotMatch(edits.at(-1)!, /失败/);
+});
+
+test("TPM installed list sorts, deduplicates, escapes and paginates at 24 entries", async () => {
+  const sent: string[] = [];
+  const context = {
+    signal: new AbortController().signal,
+    telegram: {
+      edit: async (_message: unknown, text: string) => {sent.push(text);},
+      reply: async (_message: unknown, text: string) => {sent.push(text);},
+    },
+  } as unknown as PluginContext;
+  const ids = Array.from({length: 50}, (_, index) => `plugin_${String(index).padStart(2, "0")}`);
+  const releases = {snapshot: () => ({generations: [...ids, ids[0]].reverse().map(id => ({id, state: "active"}))})};
+  const plugin = createTpm({} as Parameters<typeof createTpm>[0], releases as unknown as PluginReleases, "/unused", "123");
+  await plugin.commands.tpm.handle({args: [], prefix: "<", command: "tpm", message: {senderId: "other"}} as never, context);
+  assert.equal(sent.length, 3);
+  sent.forEach((html, index) => {
+    assert.ok(html.length < 3500);
+    const [visible] = HTMLParser.parse(html);
+    assert.ok(visible.includes(`${index + 1}/3 页`));
+    assert.ok(visible.includes("<tpm search"));
+  });
+  const lines = sent.flatMap(html => HTMLParser.parse(html)[0].split("\n")
+    .filter(line => line.startsWith("• ")).map(line => line.slice(2)));
+  assert.deepEqual(lines, ids);
+});
+
+test("TPM failure feedback exposes only the stage code and safe next step", async () => {
+  const sent: string[] = [];
+  const context = {
+    signal: new AbortController().signal,
+    telegram: {edit: async (_message: unknown, text: string) => {sent.push(text);}},
+    processes: {run: async () => {throw Object.assign(new Error("private internal payload"), {code: "EXIT_FAILED"});}},
+    log: {error: () => {}},
+  } as unknown as PluginContext;
+  const plugin = createTpm({} as Parameters<typeof createTpm>[0], {} as PluginReleases, "/unused", "123");
+  await plugin.commands.tpm.handle({args: ["search"], prefix: ".", command: "tpm",
+    message: {senderId: "123", outgoing: true}} as never, context);
+  const [visible] = HTMLParser.parse(sent.at(-1)!);
+  assert.match(visible, /阶段：仓库访问/);
+  assert.match(visible, /repository \/ EXIT_FAILED/);
+  assert.match(visible, /node scripts\/plugin-repository.cjs search/);
+  assert.ok(!visible.includes("private internal payload"));
 });

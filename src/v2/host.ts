@@ -95,6 +95,7 @@ export class PluginHost {
   listPlugins() {
     return [...this.plugins.values()].filter(plugin => plugin.ready).map(({definition}) => ({
       id: definition.id, description: definition.description,
+      ...(definition.renderHelp ? {renderHelp: definition.renderHelp} : {}),
       commands: Object.entries(definition.commands).map(([name, command]) => ({name, description: command.description})),
       jobs: Object.entries(definition.jobs ?? {}).map(([name, job]) => ({name, cron: job.cron, description: job.description})),
     }));

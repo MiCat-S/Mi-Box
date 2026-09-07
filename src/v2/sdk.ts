@@ -1,4 +1,5 @@
 export {getBotName} from "./branding";
+export * as ui from "./ui";
 import type { ResourceScope } from "./lifecycle";
 import type { JsonStore } from "./storage";
 import type { ScheduledJob } from "./scheduler";
@@ -116,6 +117,8 @@ export interface PluginDefinition {
   readonly apiVersion: typeof PLUGIN_API_VERSION;
   readonly id: string;
   readonly description: string;
+  /** Generate plugin-authored help HTML for the prefix used to request it. */
+  readonly renderHelp?: (prefix: string) => string;
   readonly commands: Readonly<Record<string, CommandDefinition>>;
   readonly listeners?: readonly MessageListener[];
   readonly jobs?: Readonly<Record<string, JobDefinition>>;
@@ -143,6 +146,7 @@ export function definePlugin(definition: PluginDefinition): PluginDefinition {
     commands[name] = Object.freeze({...value});
   }
   if (definition.listeners?.some(listener => typeof listener?.handle !== "function")) throw new Error("Invalid message listener");
+  if (definition.renderHelp !== undefined && typeof definition.renderHelp !== "function") throw new Error("Invalid help renderer");
   if (definition.settings !== undefined && typeof definition.settings !== "function") throw new Error("Invalid settings factory");
   for (const [name, service] of Object.entries(definition.services ?? {})) {
     if (!/^[a-z0-9_]+$/i.test(name) || !service || typeof service.description !== "string" || typeof service.handle !== "function") {
