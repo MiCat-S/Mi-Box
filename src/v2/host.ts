@@ -225,6 +225,10 @@ export class PluginHost {
           const plugin = this.plugins.get(id);
           if (plugin?.scope === scope && plugin.ready) return handler(signal);
         }, signal))},
+      plugins: Object.freeze({list: () => {
+        scope.signal.throwIfAborted();
+        return Object.freeze(this.listPlugins().map(({id, description}) => Object.freeze({id, description})));
+      }}),
       commands: {parse: (text: string) => {
         const parsed = this.parse(text);
         return parsed && Object.freeze({...parsed, args: Object.freeze([...parsed.args])});

@@ -258,6 +258,7 @@ export class ScopedProcesses {
       let settled = false;
       let stopping = false;
       let escalated = false;
+      let killDelivered = false;
       let kind: FailureKind | undefined;
       let exitCode: number | null = null;
       let exitSignal: NodeJS.Signals | null = null;
@@ -265,12 +266,17 @@ export class ScopedProcesses {
       let grace: ReturnType<typeof setTimeout> | undefined;
       let deadline: ReturnType<typeof setTimeout> | undefined;
 
+      const isDarwinPostKillTeardown = (error: unknown): boolean =>
+        process.platform === "darwin" && killDelivered && error instanceof Error &&
+        "code" in error && error.code === "EPERM";
       const alive = (): boolean => {
         if (!child.pid) return false;
         if (!POSIX_GROUPS) return !exited;
         try { process.kill(-child.pid, 0); return true; }
         catch (error) {
           if (isMissing(error)) return false;
+          // Darwin can transiently report EPERM while reaping a group after an accepted SIGKILL.
+          if (isDarwinPostKillTeardown(error)) return true;
           // Permission/probe failures are not evidence of process-group exit.
           kind ??= "control";
           return true;
@@ -281,8 +287,9 @@ export class ScopedProcesses {
         try {
           if (POSIX_GROUPS) process.kill(-child.pid, termination);
           else child.kill(termination);
+          if (termination === "SIGKILL") killDelivered = true;
         } catch (error) {
-          if (!isMissing(error)) kind ??= "control";
+          if (!isMissing(error) && !isDarwinPostKillTeardown(error)) kind ??= "control";
         }
       };
       const finish = (): void => {

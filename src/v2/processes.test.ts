@@ -15,6 +15,7 @@ import {
 } from "./processes";
 
 const POSIX = process.platform !== "win32";
+const DARWIN = process.platform === "darwin";
 const OPTIONS = { timeout: 15_000 };
 const node = process.execPath;
 
@@ -290,6 +291,45 @@ test("leader close with closed pipes still waits for and kills a live forked des
   assert.equal(runner.snapshot().active, 1);
   assert.equal(scope.snapshot().pendingTasks, 1);
   const result = await running;
+  assert.equal(result.exitCode, 0);
+  assert.equal(alive(pid), false);
+  assert.equal(alive(-children[0].pid!), false);
+});
+
+test("macOS post-KILL group teardown tolerates transient EPERM before confirmed exit", {...OPTIONS, skip: !DARWIN}, async t => {
+  const {runner, root, children} = await fixture(t, {killGraceMs: 20});
+  const descendant = path.join(root, "descendant.cjs");
+  const pidFile = path.join(root, "descendant.pid");
+  await fs.writeFile(descendant, `
+    process.on('SIGTERM', () => {});
+    require('node:fs').writeFileSync(process.argv[2], String(process.pid));
+    process.send('ready');
+    setInterval(() => {}, 1000);
+  `);
+  const kill = process.kill.bind(process);
+  let killDelivered = false;
+  let transientProbes = 2;
+  t.mock.method(process, "kill", (pid: number, signal?: string | number) => {
+    if (children[0]?.pid && pid === -children[0].pid) {
+      if (signal === "SIGKILL" && !killDelivered) {
+        const sent = kill(pid, signal);
+        killDelivered = true;
+        return sent;
+      }
+      if (signal === 0 && killDelivered && transientProbes > 0) {
+        transientProbes--;
+        throw Object.assign(new Error("post-kill group teardown"), {code: "EPERM"});
+      }
+    }
+    return kill(pid, signal);
+  });
+  const result = await runner.run(node, ["-e", `
+    const {fork} = require('node:child_process');
+    const child = fork(process.argv[1], [process.argv[2]], {execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc']});
+    child.once('message', () => { child.disconnect(); process.exit(0); });
+  `, descendant, pidFile]);
+  const pid = Number(await fs.readFile(pidFile, "utf8"));
+  assert.equal(killDelivered, true);
   assert.equal(result.exitCode, 0);
   assert.equal(alive(pid), false);
   assert.equal(alive(-children[0].pid!), false);

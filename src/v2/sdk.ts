@@ -63,6 +63,9 @@ export interface PluginContext {
     available(pluginId: string, service: string): boolean;
     call<T = unknown>(pluginId: string, service: string, input: unknown, signal?: AbortSignal): Promise<T>;
   };
+  readonly plugins: {
+    list(): readonly Readonly<{id: string; description: string}>[];
+  };
   /** Read-only view of the host's current prefix and alias routing rules. */
   readonly commands: {
     parse(text: string): CommandRoute | undefined;

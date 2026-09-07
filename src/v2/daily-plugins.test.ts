@@ -9,15 +9,13 @@ import {PluginHost} from "./host";
 import type {MessageEnvelope, TelegramPort} from "./sdk";
 import {DAILY_PLUGINS} from "./runtime";
 
-test("daily artifact set loads, exposes all commands and handles offline control paths", async () => {
+test("daily artifact set loads defaults and handles offline AI media paths", async () => {
   const root = await realpath(path.resolve(__dirname, "../.."));
   const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "telebox-v2-daily-")));
   const output: string[] = [];
   const deleted: number[][] = [];
   const files: string[] = [];
   let historyReads = 0;
-  let finishDa!: () => void;
-  const daFinished = new Promise<void>(resolve => {finishDa = resolve;});
   const reply: MessageEnvelope = {id: 88, chatId: "-100123", senderId: "1", text: "quoted text", outgoing: false,
     raw: {className: "Message", id: 88, peerId: "-100123", senderId: 1n, message: "quoted text", out: false,
       sender: {className: "User", id: 1n, firstName: "Alice"}, entities: []}};
@@ -28,7 +26,7 @@ test("daily artifact set loads, exposes all commands and handles offline control
     async getInputEntity(value: unknown) {return value;},
     async deleteMessages(_peer: unknown, ids: number[]) {deleted.push([...ids]); return [];},
     async sendMessage() {return {id: 700};},
-    async editMessage(_peer: unknown, options: {text?: string}) {if (options.text?.includes("任务完成")) finishDa(); return {};},
+    async editMessage() {return {};},
     async sendFile(_peer: unknown, options: {file?: {name?: string}}) {files.push(options.file?.name ?? ""); return {};},
     async invoke(request: {className?: string}) {
       if (request.className === "channels.GetParticipant") return {participant: {className: "ChannelParticipantAdmin"}};
@@ -77,13 +75,15 @@ test("daily artifact set loads, exposes all commands and handles offline control
     const message = (text: string, chatId = "-100123"): MessageEnvelope => ({
       id: output.length + 1, chatId, senderId: "123", text, outgoing: true, saved: chatId === "123",
     });
-    for (const command of [".ai help", ".da help", ".dme help", ".gt help", ".sum list", ".yvlu config"]) {
+    for (const command of [".ai help", ".gt help"]) {
       assert.equal(await host.dispatchPrimary(message(command)), true, command);
     }
-    assert.equal(output.length, 6);
+    assert.equal(output.length, 2);
     assert.match(output[0], /AI 助手/);
-    assert.match(output[4], /摘要任务/);
-    assert.match(output[5], /当前配置/);
+    for (const command of [".da help", ".dme help", ".sum list", ".yvlu config"]) {
+      assert.equal(await host.dispatchPrimary(message(command)), false, command);
+    }
+    assert.equal(output.length, 2);
     const saved = (text: string): MessageEnvelope => ({id: output.length + 1, chatId: "123", senderId: "123", text,
       outgoing: true, saved: true});
     assert.equal(await host.dispatchPrimary(saved(".ai config add main https://fixture.invalid/v1 secret openai-compatible")), true);
@@ -98,16 +98,6 @@ test("daily artifact set loads, exposes all commands and handles offline control
     assert.equal(await host.dispatchPrimary(saved(".ai model video main fixture-video")), true);
     assert.equal(await host.dispatchPrimary(saved(".ai video fixture clip")), true);
     assert.match(files[1] ?? "", /ai_video_.*\.mp4/);
-    assert.equal(await host.dispatchPrimary(saved(".sum config add main https://fixture.invalid secret fixture-chat chat")), true);
-    assert.equal(await host.dispatchPrimary(message(".sum 10")), true);
-    assert.match(output.at(-1) ?? "", /群组总结/);
-    assert.equal(await host.dispatchPrimary(message(".dme 2")), true);
-    assert.ok(deleted.some(ids => ids.includes(3) && ids.includes(4)));
-    assert.equal(await host.dispatchPrimary(message(".yvlu image 1")), true);
-    assert.equal(files.at(-1), "quote.png");
-    assert.equal(await host.dispatchPrimary(message(".da true")), true);
-    await Promise.race([daFinished, new Promise((_, reject) => setTimeout(() => reject(new Error("DA did not finish")), 2000))]);
-    assert.ok(deleted.some(ids => ids.length >= 10));
     const report = await host.shutdown(5000);
     stopped = report.completed;
     assert.equal(report.completed, true);

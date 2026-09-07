@@ -37,6 +37,55 @@ function plugin(handle: (input: CommandInvocation, context: PluginContext) => vo
   return definePlugin({apiVersion: 1, id: "ping", description: "fixture", commands: {ping: {description: "fixture", handle}}, ...rest});
 }
 
+test("plugin context exposes current ready plugins as isolated snapshots", async t => {
+  const {host} = await fixture(t);
+  let context!: PluginContext;
+  await host.load(plugin(() => {}, {setup(value) { context = value; }}));
+
+  assert.deepEqual(context.plugins.list(), [{id: "ping", description: "fixture"}]);
+  await host.load(definePlugin({apiVersion: 1, id: "other", description: "other fixture", commands: {}}));
+  assert.deepEqual(context.plugins.list(), [
+    {id: "ping", description: "fixture"},
+    {id: "other", description: "other fixture"},
+  ]);
+
+  const snapshot = context.plugins.list() as {id: string; description: string}[];
+  assert.throws(() => snapshot.push({id: "injected", description: "injected"}), TypeError);
+  assert.throws(() => { snapshot[0].description = "changed"; }, TypeError);
+  assert.deepEqual(host.listPlugins().map(({id, description}) => ({id, description})), [
+    {id: "ping", description: "fixture"},
+    {id: "other", description: "other fixture"},
+  ]);
+
+  await host.unload("other");
+  assert.deepEqual(context.plugins.list(), [{id: "ping", description: "fixture"}]);
+  await host.unload("ping");
+  assert.throws(() => context.plugins.list(), {name: "AbortError"});
+});
+
+test("plugin context excludes plugins whose setup has not completed", async t => {
+  const {host} = await fixture(t);
+  const started = deferred();
+  const release = deferred();
+  let context!: PluginContext;
+  const loading = host.load(definePlugin({
+    apiVersion: 1,
+    id: "pending",
+    description: "pending fixture",
+    commands: {},
+    async setup(value) {
+      context = value;
+      started.resolve();
+      await release.promise;
+    },
+  }));
+  await started.promise;
+  assert.deepEqual(context.plugins.list(), []);
+  release.resolve();
+  await loading;
+  assert.deepEqual(context.plugins.list(), [{id: "pending", description: "pending fixture"}]);
+});
+
 test("host parses longest aliases without changing the original message", async t => {
   const {host, edits} = await fixture(t, {prefixes: ["!", "."], aliases: {go: "ping one", "go now": "ping two"}});
   let received: CommandInvocation | undefined;
