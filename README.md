@@ -62,7 +62,7 @@ TPM 仅允许账号所有者管理扩展。安装和更新从配套插件仓库�
 
 ### 自定义显示名
 
-在账号本人的收藏夹发送 `.help name Cat Bot`，即可将帮助、更新、重启及年度报告中的显示名设置为 `Cat Bot`。支持空格和中文，最多 48 个字符；设置立即生效，并保存到 `assets/help/branding.json`。
+账号本人可在群聊、私聊或收藏夹发送 `.help name Cat Bot`，即可将帮助、更新、重启及年度报告中的显示名设置为 `Cat Bot`。支持空格和中文，最多 48 个字符；设置立即生效，并保存到 `assets/help/branding.json`。
 
 - `.help name`：查看当前显示名。
 - `.help name reset`：恢复默认 `MiBot`。

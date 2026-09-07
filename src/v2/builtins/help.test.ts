@@ -454,7 +454,7 @@ test("50 help cycles keep scope resources empty and produce independent current 
   }
 });
 
-test("display name persists, escapes HTML, resets, and restricts changes to the owner Saved Messages", async t => {
+test("display name persists, escapes HTML, resets, and allows owner changes across chats", async t => {
   const original = getBotName();
   t.after(() => setBotName(original));
   const f = fixture(t);
@@ -474,11 +474,12 @@ test("display name persists, escapes HTML, resets, and restricts changes to the 
   setBotName("temporary");
   await help.setup!(context);
   assert.equal(getBotName(), "Cat <Bot> & Co");
-  await run(["name", "other"], {...message, chatId: "-1001"});
+  await run(["name", "Cat <Bot> & Co"], {...message, chatId: "-1001"});
+  await run(["name", "Cat <Bot> & Co"], {...message, chatId: "777"});
   await run(["name", "other"], {...message, senderId: "99"});
   await run(["name", "other"], {...message, forwarded: true});
   await run(["name", "x".repeat(49)]);
-  assert.equal(writes, 1);
+  assert.equal(writes, 3);
   assert.equal(getBotName(), "Cat <Bot> & Co");
   await run(["name", "reset"]);
   assert.equal(saved.name, "MiBot");

@@ -171,8 +171,8 @@ export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
         await context.telegram.edit(invocation.message, `当前显示名：${getBotName()}\n设置：${invocation.prefix}help name 名称\n恢复：${invocation.prefix}help name reset`);
         return;
       }
-      if (!ownerId || invocation.message.forwarded || invocation.message.senderId !== ownerId || invocation.message.chatId !== ownerId) {
-        await context.telegram.edit(invocation.message, "请由账号本人在收藏夹设置显示名");
+      if (!ownerId || invocation.message.forwarded || invocation.message.senderId !== ownerId) {
+        await context.telegram.edit(invocation.message, "只有账号本人可以设置显示名");
         return;
       }
       const name = value === "reset" ? "MiBot" : value;
@@ -305,7 +305,7 @@ export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
       const state = await context.storage.json("branding.json", {name: "MiBot"}).read();
       setBotName(state.name);
     },
-    description: "查看帮助；收藏夹使用 help name 名称 设置显示名，help name reset 恢复默认",
+    description: "查看帮助；使用 help name 名称 设置显示名，help name reset 恢复默认",
     commands: {
       help: { description: "查看命令或模块帮助", handle },
       h: { description: "查看命令或模块帮助", handle },
