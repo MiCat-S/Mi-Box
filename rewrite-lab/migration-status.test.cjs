@@ -22,3 +22,13 @@ test('offline evidence does not claim live or resource acceptance', () => {
   assert.ok(gt.pending.some(item => item.includes('resource')));
   assert.equal(status.modules.find(module => module.source === 'TeleBox-Plugins/outdated/q/q.ts').status, 'planned');
 });
+
+test('existing V2 entries are visible without overstating acceptance', () => {
+  const status = migrationStatus();
+  const annual = status.modules.find(module => module.source === 'TeleBox-Plugins/annualreport/annualreport.ts');
+  assert.equal(annual.status, 'in-progress');
+  assert.equal(annual.implementation, 'TeleBox-Plugins/annualreport/v2.ts');
+  assert.ok(annual.tests.some(file => file.endsWith('annualreport-v2.test.js')));
+  assert.ok(annual.pending.some(item => item.includes('external')));
+  assert.equal(status.modules.find(module => module.source === 'TeleBox-Plugins/warp/warp.ts').status, 'planned');
+});

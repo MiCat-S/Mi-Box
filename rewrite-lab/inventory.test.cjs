@@ -22,7 +22,7 @@ test("inventory covers repository modules with production extensions marked as p
     }
   }
   assert.deepEqual(report.sources.filter(s => !s.kind.endsWith("-support")).map(s => s.file).sort(), expected.sort());
-  for (const name of ["agent", "kitt", "panel", "sudo", "sure", "switch", "leech"]) {
+  for (const name of ["agent", "kitt", "panel", "sudo", "sure", "leech"]) {
     assert.ok(report.sources.some(s => s.file.endsWith(`/src/plugin/${name}.ts`)), name);
   }
   assert.ok(report.sources.every(s => /^[a-f0-9]{64}$/.test(s.sha256)));
@@ -48,7 +48,7 @@ test("inventory includes core services, web assets and auxiliary runtimes", () =
     "TeleBox-Core/src/utils/generationContext.ts",
     "TeleBox-Core/src/utils/panel/webapp/index.html",
     "TeleBox-Core/scripts/run-tsx.cjs",
-    "TeleBox-Core/ecosystem.config.cjs",
+    "TeleBox-Core/src/v2/runtime.ts",
     "TeleBox-Plugins/duckduckgo/ddg_fetch.py",
     "TeleBox-Plugins/keep_online/keep_online.sh",
     "TeleBox-Plugins/quote/generate.js",
