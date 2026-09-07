@@ -63,10 +63,21 @@ export interface PluginContext {
     available(pluginId: string, service: string): boolean;
     call<T = unknown>(pluginId: string, service: string, input: unknown, signal?: AbortSignal): Promise<T>;
   };
+  /** Read-only view of the host's current prefix and alias routing rules. */
+  readonly commands: {
+    parse(text: string): CommandRoute | undefined;
+  };
   readonly http: Pick<ScopedHttp, "withResponse" | "text" | "json">;
   readonly processes: Pick<ScopedProcesses, "run">;
   readonly files: Pick<ScopedFiles, "dataPath" | "dataDirectory" | "dataFile" | "withTemp">;
   readonly log: PluginLogger;
+}
+
+export interface CommandRoute {
+  readonly prefix: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly text: string;
 }
 
 export interface CommandInvocation {

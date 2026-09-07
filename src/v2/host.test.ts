@@ -51,6 +51,24 @@ test("host parses longest aliases without changing the original message", async 
   assert.equal(await host.dispatchPrimary({...envelope, text: ".toString"}), false);
 });
 
+test("plugin contexts expose current command routing without mutation access", async t => {
+  const {host} = await fixture(t, {prefixes: ["!", "🙂"], aliases: {"go now": "ping two"}});
+  let context!: PluginContext;
+  await host.load(plugin((_input, current) => { context = current; }));
+  await host.dispatchPrimary({...envelope, text: "!ping"});
+  assert.deepEqual(context.commands.parse("🙂go now extra"), {
+    prefix: "🙂", command: "ping", args: ["two", "extra"], text: "🙂ping two extra",
+  });
+  const route = context.commands.parse("!ping value")!;
+  assert.throws(() => (route.args as string[]).push("mutate"));
+  host.replacePrefixes(["$"]);
+  host.replaceAliases({short: "ping current"});
+  assert.equal(context.commands.parse("!ping"), undefined);
+  assert.deepEqual(context.commands.parse("$short"), {
+    prefix: "$", command: "ping", args: ["current"], text: "$ping current",
+  });
+});
+
 test("primary admission and edited-message defaults preserve owner boundary", async t => {
   const {host} = await fixture(t);
   let calls = 0;
