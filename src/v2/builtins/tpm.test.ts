@@ -205,7 +205,7 @@ test("TPM repository search runs through the real host process limits", async t 
   assert.match(HTMLParser.parse(edits.at(-1)!)[0], /成功 2 · 跳过 0 · 失败 0/);
 });
 
-test("TPM installed list sorts, deduplicates, escapes and paginates at 24 entries", async () => {
+test("TPM installed list sorts and deduplicates into a compact expandable two-column message", async () => {
   const sent: string[] = [];
   const context = {
     signal: new AbortController().signal,
@@ -218,15 +218,16 @@ test("TPM installed list sorts, deduplicates, escapes and paginates at 24 entrie
   const releases = {snapshot: () => ({generations: [...ids, ids[0]].reverse().map(id => ({id, state: "active"}))})};
   const plugin = createTpm({} as Parameters<typeof createTpm>[0], releases as unknown as PluginReleases, "/unused", "123");
   await plugin.commands.tpm.handle({args: [], prefix: "<", command: "tpm", message: {senderId: "other"}} as never, context);
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, 1);
   sent.forEach((html, index) => {
     assert.ok(html.length < 3500);
     const [visible] = HTMLParser.parse(html);
-    assert.ok(visible.includes(`${index + 1}/3 页`));
+    assert.match(html, /<blockquote expandable/);
+    assert.ok(!visible.includes("1/1 页"));
     assert.ok(visible.includes("<tpm search"));
   });
-  const lines = sent.flatMap(html => HTMLParser.parse(html)[0].split("\n")
-    .filter(line => line.startsWith("• ")).map(line => line.slice(2)));
+  const lines = sent.flatMap(html => [...html.matchAll(/<code>(plugin_[^<]+)<\/code>/g)]
+    .flatMap(match => match[1].trim().split(/\s+/)));
   assert.deepEqual(lines, ids);
 });
 
@@ -350,4 +351,40 @@ test("TPM update all rejects extra or missing candidates before changing plugins
     assert.deepEqual(f.operations, []);
     assert.match(f.edits.at(-1)!, /插件操作失败/);
   }
+});
+
+test("TPM batch results show failures before expandable success details", async () => {
+  const f = fixture();
+  for (let index = 0; index < 115; index++) f.generations.push({id: `plugin_${String(index).padStart(3, "0")}`, state: "active"});
+  const activate = f.releases.activate;
+  f.releases.activate = async id => {
+    if (id === "plugin_114") throw Object.assign(new Error("failed"), {code: "LOAD"});
+    await activate(id);
+  };
+  await f.run(["update", "all"]);
+  const result = f.edits.at(-1)!;
+  const visible = HTMLParser.parse(result)[0];
+  assert.match(visible, /成功 114 · 跳过 0 · 失败 1/);
+  assert.ok(result.indexOf("plugin_114") < result.indexOf("<blockquote"));
+  assert.ok(result.length <= 3500);
+  assert.ok(HTMLParser.parse(result)[1].length <= 90);
+  for (const {id} of f.generations) assert.ok(visible.includes(id));
+  assert.equal(f.edits.filter(message => message.includes("批量更新完成")).length, 1);
+});
+
+test("TPM compact lists retain long names across bounded expandable pages", async () => {
+  const f = fixture();
+  const ids = Array.from({length: 220}, (_, index) => `plugin_${String(index).padStart(3, "0")}_${"x".repeat(50)}`);
+  ids.forEach(id => f.generations.push({id, state: "active"}));
+  await f.run(["list"]);
+  assert.ok(f.edits.length > 1);
+  const visible = f.edits.map((html, index) => {
+    const [body, entities] = HTMLParser.parse(html);
+    assert.ok(html.length <= 3500);
+    assert.ok(entities.length <= 90);
+    assert.ok(body.endsWith(`${index + 1}/${f.edits.length} 页`));
+    assert.doesNotMatch(body, /超出单条消息|不支持的格式/);
+    return body;
+  }).join("\n");
+  for (const id of ids) assert.equal(visible.split(id).length - 1, 1);
 });

@@ -5,10 +5,9 @@ import type {PluginHost} from "../host";
 import type {PluginReleases} from "../releases";
 import {isOwnerOrGroupSendAs} from "../permissions";
 import {code, command, concat, text, type Html} from "../ui/text";
-import {renderDocument, section} from "../ui/document";
+import {renderDocument, richText, section} from "../ui/document";
 import {renderFeedback} from "../ui/feedback";
 
-const PAGE_SIZE = 24;
 const htmlOptions = {parseMode: "html", linkPreview: false} as const;
 type Candidate = {id: string; revision?: string; error?: string};
 const validId = (id: string) => /^[a-z][a-z0-9_-]{0,63}$/.test(id);
@@ -21,6 +20,29 @@ function errorCode(error: unknown): string {
   return typeof value === "string" && allowed.has(value) ? value : "UNKNOWN";
 }
 
+async function compactList(ids: readonly string[]): Promise<readonly Html[]> {
+  const sorted = [...new Set(ids)].sort();
+  if (!sorted.length) return [text("没有匹配结果")];
+  const width = Math.min(18, Math.max(...sorted.map(id => id.length)));
+  const blocks: Html[] = [];
+  let body = "", rows = 0;
+  for (let index = 0; index < sorted.length; index += 1) {
+    const first = sorted[index], second = sorted[index + 1];
+    const paired = first.length <= width && second !== undefined && second.length <= width;
+    const row = code(paired ? `${first.padEnd(width)}  ${second}` : first);
+    if (paired) index += 1;
+    // Keep each expandable block within the renderer's HTML and entity budgets.
+    if (body && (body.length + row.length + 1 > 2400 || rows === 60)) {
+      blocks.push(...await richText(`<blockquote expandable>${body}</blockquote>`));
+      body = ""; rows = 0;
+    }
+    body += `${body ? "\n" : ""}${row}`;
+    rows += 1;
+  }
+  if (body) blocks.push(...await richText(`<blockquote expandable>${body}</blockquote>`));
+  return blocks;
+}
+
 async function listView(
   ids: readonly string[],
   title: string,
@@ -29,24 +51,16 @@ async function listView(
   query?: string,
 ): Promise<readonly string[]> {
   const sorted = [...new Set(ids)].sort();
-  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const pages: Html[][] = [];
-  for (let page = 0; page < pageCount; page += 1) {
-    const values = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-    pages.push(values.length ? values.map(id => concat(text("• "), code(id))) : [text("没有匹配结果")]);
-  }
-  const output = (await Promise.all(pages.map(lines => renderDocument({
+  const output = await renderDocument({
     title: `${getBotName()} 插件管理`,
     subtitle: `${title}${query !== undefined ? ` · 搜索：${query || "全部"}` : ""} · ${sorted.length} 个`,
-    sections: [section(undefined, lines)],
+    sections: [section(undefined, await compactList(sorted))],
     footer: [
       text(hint),
       concat(text("用法："), command(prefix, "tpm", title === "已安装扩展" ? "search [关键词]" : "install 插件名")),
     ],
-  })))).flat();
-  // The renderer caps HTML at 3500 units, leaving room below Telegram's
-  // 4096-unit limit for the physical page number without another split.
-  return output.map((page, index) => `${page}\n${index + 1}/${output.length} 页`);
+  });
+  return output.map((page, index) => output.length > 1 ? `${page}\n${index + 1}/${output.length} 页` : page);
 }
 
 export default function createTpm(host: PluginHost, releases: PluginReleases, root: string, ownerId: string) {
@@ -162,9 +176,9 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
             title: `${getBotName()} 插件批量${verb}完成`,
             subtitle: `成功 ${installedIds.length} · 跳过 ${skipped.size} · 失败 ${failed.length}`,
             sections: [
-              section(`已${verb}`, installedIds.length ? installedIds.map(id => code(id)) : [text(`无${verb}成功的插件`)]),
-              ...(skipped.size ? [section("已安装或默认模块", [...skipped].sort().map(id => code(id)))] : []),
               ...(failed.length ? [section(`${verb}失败`, failed.map(item => concat(code(item.id), text(` · ${item.code}`))))] : []),
+              ...(installedIds.length ? [section(`已${verb} · ${installedIds.length}`, await compactList(installedIds))] : []),
+              ...(skipped.size ? [section(`已安装或默认模块 · ${skipped.size}`, await compactList([...skipped]))] : []),
             ],
             footer: [...(removing ? [text("插件配置数据已保留")] : []),
               concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
