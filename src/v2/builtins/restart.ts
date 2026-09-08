@@ -1,7 +1,7 @@
 import {brandText} from "../branding";
 import {randomUUID} from "node:crypto";
 import {definePlugin, type PluginContext} from "../sdk";
-import {isOwner} from "../permissions";
+import {isOwnerOrGroupSendAs} from "../permissions";
 
 const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
 const escapeHtml = (value: string): string => value
@@ -51,7 +51,7 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
     cleanup() { context = undefined; },
     commands: {restart: {description: "重启当前服务", ignoreEdited: true, async handle(invocation, ctx) {
       ctx.signal.throwIfAborted();
-      if (!isOwner(invocation.message, ownerId)) {
+      if (!isOwnerOrGroupSendAs(invocation.message, ownerId)) {
         await ctx.telegram.edit(invocation.message, "没有重启服务的权限");
         return;
       }

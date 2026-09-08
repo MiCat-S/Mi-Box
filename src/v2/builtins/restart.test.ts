@@ -3,9 +3,20 @@ import test from "node:test";
 import {mkdtemp, realpath, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import path from "node:path";
+import {Api} from "teleproto";
+import {returnBigInt} from "teleproto/Helpers";
+import {messageEnvelope} from "../telegram";
 import {JsonStore} from "../storage";
 import createRestart from "./restart";
 import type {PluginContext, CommandInvocation} from "../sdk";
+
+function channelMessage(options: Partial<ConstructorParameters<typeof Api.Message>[0]> = {}) {
+  return messageEnvelope(new Api.Message({id: 71, date: 1,
+    peerId: new Api.PeerChannel({channelId: returnBigInt(456)}),
+    fromId: new Api.PeerChannel({channelId: returnBigInt(789)}),
+    out: true, message: ".restart", ...options,
+  }), {selfId: "123"});
+}
 
 function fixture(options: {fail?: boolean; cancel?: boolean; editFail?: boolean} = {}) {
   const controller = new AbortController();
@@ -62,6 +73,44 @@ test("non-owner cannot restart the service", async t => {
   await createRestart("123").commands.restart.handle({...f.inv, message: {...f.inv.message, senderId: "999"}}, f.ctx);
   assert.equal(f.calls.length, 0);
   assert.match(f.edits[0], /没有.*权限/);
+});
+test("group channel identity restarts once and receives readiness on the original message", async t => {
+  const f = fixture(); t.after(f.restore);
+  const first = createRestart("123");
+  const message = channelMessage();
+  await first.commands.restart.handle({...f.inv, message}, f.ctx);
+  assert.deepEqual(f.calls, [["/usr/bin/systemctl", ["--no-block", "restart", "mibot.service"],
+    {timeoutMs: 5000, maxOutputBytes: 2000}]]);
+  const receipt = f.state().pending as {ownerId: string; chatId: string; messageId: number};
+  assert.equal(receipt.ownerId, "123");
+  assert.equal(receipt.chatId, "-100456");
+  assert.equal(receipt.messageId, 71);
+  const next = createRestart("123");
+  await next.setup!(f.ctx);
+  const targets: unknown[] = [];
+  f.ctx.telegram.edit = async (target, text) => {targets.push(target); f.edits.push(text);};
+  await next.notifyReady();
+  assert.deepEqual(targets, [{id: 71, chatId: "-100456", text: "", outgoing: true}]);
+  assert.match(f.edits.at(-1)!, /重启成功/);
+  assert.equal(f.state().pending, null);
+});
+test("channel restart rejects incoming, forwarded, edited, broadcast and incomplete identities", async t => {
+  const f = fixture(); t.after(f.restore);
+  const channel = channelMessage();
+  for (const [message, owner] of [
+    [channelMessage({out: false}), "123"],
+    [{...channel, forwarded: true}, "123"],
+    [channelMessage({editDate: 2}), "123"],
+    [channelMessage({post: true}), "123"],
+    [{...channel, raw: undefined}, "123"],
+    [{...channel, senderId: undefined}, "123"],
+    [channel, ""],
+  ] as const) {
+    await createRestart(owner).commands.restart.handle({...f.inv, message}, f.ctx);
+    assert.match(f.edits.at(-1)!, /没有.*权限/);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.state().pending, null);
 });
 test("cancellation after the notice prevents spawning", async t => {
   const f = fixture({cancel: true}); t.after(f.restore);
