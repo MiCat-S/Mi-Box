@@ -5,8 +5,11 @@ const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 const {buildPlugin} = require('./build-v2-plugin.cjs');
 
-function run(action, id) {
-  if (!['search', 'build'].includes(action) || action === 'build' && !/^[a-z][a-z0-9_-]{0,63}$/.test(id || '')) throw new Error('Invalid plugin request');
+function run(action, ...targets) {
+  const validId = value => /^[a-z][a-z0-9_-]{0,63}$/.test(value);
+  if (!['search', 'build', 'build-all'].includes(action) ||
+      action === 'build' && (targets.length !== 1 || !validId(targets[0])) ||
+      action === 'build-all' && targets.some(id => !validId(id))) throw new Error('Invalid plugin request');
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'mibot-plugins-'));
   try {
     const repository = path.join(stage, 'repository');
@@ -24,9 +27,22 @@ function run(action, id) {
       .filter(file => /^[a-z][a-z0-9_-]{0,63}\/v2\.ts$/.test(file))
       .map(file => file.split('/')[0]).sort();
     if (action === 'search') return {ids};
-    if (!ids.includes(id)) throw new Error('V2 plugin not available');
-    git(['sparse-checkout', 'set', '--no-cone', `/${id}/v2.ts`, `/${id}/v2/`], repository);
+    const id = targets[0];
+    if (action === 'build' && !ids.includes(id)) throw new Error('V2 plugin not available');
+    const excluded = new Set(targets);
+    const selected = action === 'build' ? [id] : ids.filter(value => !excluded.has(value));
+    if (!selected.length) return {ids, candidates: []};
+    git(['sparse-checkout', 'set', '--no-cone', ...selected.flatMap(value => [`/${value}/v2.ts`, `/${value}/v2/`])], repository);
     git(['checkout', 'HEAD'], repository);
+    if (action === 'build-all') {
+      const candidates = selected.map(id => {
+        try {
+          const {manifest} = buildPlugin({id, packageRoot: path.join(repository, id), entry: 'v2.ts'});
+          return {id, revision: manifest.revision};
+        } catch { return {id, error: 'BUILD'}; }
+      });
+      return {ids, candidates};
+    }
     const {manifest} = buildPlugin({id, packageRoot: path.join(repository, id), entry: 'v2.ts'});
     return {id, revision: manifest.revision};
   } finally {fs.rmSync(stage, {recursive: true, force: true});}
