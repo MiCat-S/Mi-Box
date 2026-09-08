@@ -1,3 +1,4 @@
+import {ArtifactError} from "../artifacts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {HTMLParser} from "teleproto/extensions/html.js";
@@ -242,4 +243,14 @@ test("TPM failure feedback exposes only the stage code and safe next step", asyn
   assert.match(visible, /repository \/ EXIT_FAILED/);
   assert.match(visible, /node scripts\/plugin-repository.cjs search/);
   assert.ok(!visible.includes("private internal payload"));
+});
+
+test("TPM preserves artifact activation diagnostics without exposing internal paths", async () => {
+  for (const code of ["FORMAT", "BOUNDARY", "LIMIT", "INTEGRITY", "IO", "BUSY", "LOAD", "FACTORY", "IDENTITY", "RELEASED"] as const) {
+    const f = fixture();
+    f.releases.activate = async () => {throw new ArtifactError(code);};
+    await f.run(["update", "dig"]);
+    assert.match(f.edits.at(-1)!, new RegExp(`activate / ${code}`));
+    assert.deepEqual(f.failures, [{stage: "activate", code}]);
+  }
 });

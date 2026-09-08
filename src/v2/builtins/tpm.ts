@@ -15,7 +15,8 @@ const validId = (id: string) => /^[a-z][a-z0-9_-]{0,63}$/.test(id);
 
 function errorCode(error: unknown): string {
   const allowed = new Set(["STATE", "CONFLICT", "STOP", "ACTIVATE", "RESTORE", "SPAWN_FAILED",
-    "EXIT_FAILED", "TIMED_OUT", "OUTPUT_LIMIT", "IO_FAILED", "CONTROL_FAILED", "CLOSED", "ABORTED"]);
+    "EXIT_FAILED", "TIMED_OUT", "OUTPUT_LIMIT", "IO_FAILED", "CONTROL_FAILED", "CLOSED", "ABORTED",
+    "FORMAT", "BOUNDARY", "LIMIT", "INTEGRITY", "IO", "BUSY", "LOAD", "FACTORY", "IDENTITY", "RELEASED"]);
   const value = error && typeof error === "object" && "code" in error ? error.code : undefined;
   return typeof value === "string" && allowed.has(value) ? value : "UNKNOWN";
 }
