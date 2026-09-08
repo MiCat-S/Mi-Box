@@ -427,7 +427,7 @@ utils/* (工具模块)
 
 ### 版本信息
 
-- **当前版本**: 0.2.9
+- **当前版本**: 以 [package.json](package.json) 的 `version` 字段为准
 - **Node.js要求**: 24.x
 - **TypeScript版本**: ^5.9.2
 - **Telegram 库版本**: teleproto ^1.228.2

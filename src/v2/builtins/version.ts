@@ -23,7 +23,7 @@ export default function createVersion(root = process.cwd()) {
       ].join("\n");
       await ctx.telegram.edit(invocation.message, text, {parseMode: "html"});
     }}, ver: {description: "version 的简写", async handle(invocation, ctx) {
-      const text = `<b>Mi Box 版本</b>\nNode.js: <code>${process.version}</code>\n平台: <code>${process.platform}/${process.arch}</code>`;
+      const text = `<b>Mi Box 版本</b>\nMi Box: <code>${await packageVersion(root)}</code>\nNode.js: <code>${process.version}</code>\n平台: <code>${process.platform}/${process.arch}</code>`;
       await ctx.telegram.edit(invocation.message, text, {parseMode: "html"});
     }}},
   });

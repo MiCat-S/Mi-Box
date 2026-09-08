@@ -157,7 +157,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
       if (sub === "ver" || sub === "version") {
         let version = "未知";
         try { version = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version ?? version; } catch {}
-        await ctx.telegram.edit(invocation.message, `<b>更新状态</b>\n当前版本：<code>${escapeHtml(String(version))}</code>\n更新操作暂未开放`, htmlOptions);
+        await ctx.telegram.edit(invocation.message, `<b>更新状态</b>\n当前版本：<code>${escapeHtml(String(version))}</code>`, htmlOptions);
         return;
       }
       if (sub === "auto") {
