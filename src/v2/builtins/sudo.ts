@@ -1,5 +1,5 @@
 import {definePlugin} from "../sdk";
-import {isOwner} from "../permissions";
+import {isOwnerOrGroupSendAs} from "../permissions";
 
 interface SudoConfig extends Record<string, unknown> {users: string[];}
 const defaults: SudoConfig = {users: []};
@@ -7,7 +7,7 @@ const defaults: SudoConfig = {users: []};
 export default function createSudo() {
   return definePlugin({apiVersion: 1, id: "sudo", description: "管理可使用高级命令的用户白名单",
     commands: {sudo: {description: "添加、删除或查看授权用户", async handle(invocation, ctx) {
-      if (!isOwner(invocation.message)) {
+      if (!isOwnerOrGroupSendAs(invocation.message, process.env.TB_OWNER_ID)) {
         await ctx.telegram.edit(invocation.message, "只有 owner 可以管理 sudo 白名单");
         return;
       }

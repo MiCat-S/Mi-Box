@@ -1,3 +1,4 @@
+import {isOwnerOrGroupSendAs} from "../permissions";
 import {getBotName, setBotName} from "../branding";
 import type {PluginHost} from "../host";
 import {definePlugin, type CommandInvocation, type PluginContext, type PluginDefinition} from "../sdk";
@@ -188,7 +189,7 @@ export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
         await context.telegram.edit(invocation.message, `当前显示名：${getBotName()}\n设置：${invocation.prefix}help name 名称\n恢复：${invocation.prefix}help name reset`);
         return;
       }
-      if (!ownerId || invocation.message.forwarded || invocation.message.senderId !== ownerId) {
+      if (!isOwnerOrGroupSendAs(invocation.message, ownerId) || invocation.message.forwarded) {
         await context.telegram.edit(invocation.message, "只有账号本人可以设置显示名");
         return;
       }

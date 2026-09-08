@@ -1,13 +1,13 @@
 import {definePlugin} from "../sdk";
 import path from "node:path";
 import {randomUUID} from "node:crypto";
-import {isPrivileged} from "../permissions";
+import {isOwnerOrGroupSendAs} from "../permissions";
 import {existsSync} from "node:fs";
 
 export default function createBf(root = process.cwd()) {
   return definePlugin({apiVersion: 1, id: "bf", description: "创建 Mi Box 配置与数据备份",
     commands: {bf: {description: "打包并发送 Mi Box 备份", async handle(invocation, ctx) {
-      if (!await isPrivileged(invocation.message)) {
+      if (!isOwnerOrGroupSendAs(invocation.message, process.env.TB_OWNER_ID)) {
         await ctx.telegram.edit(invocation.message, "没有创建备份的权限");
         return;
       }

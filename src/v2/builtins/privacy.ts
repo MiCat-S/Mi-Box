@@ -1,6 +1,6 @@
 import {definePlugin} from "../sdk";
 import {getIpPrivacy, setIpPrivacy, type IpPrivacy} from "../ip-privacy";
-import {isOwner} from "../permissions";
+import {isOwnerOrGroupSendAs} from "../permissions";
 
 export default function createPrivacy(ownerId: string) {
   let tail = Promise.resolve();
@@ -16,7 +16,7 @@ export default function createPrivacy(ownerId: string) {
         const config = getIpPrivacy();
         await context.telegram.edit(input.message, `IP显示：${config.mode === "hide" ? "完全隐藏" : `IPv4末尾${config.ipv4Segments}段、IPv6末尾${config.ipv6Segments}段打码`}\n${usage}`); return;
       }
-      if (!isOwner(input.message, ownerId) || input.message.forwarded) {
+      if (!isOwnerOrGroupSendAs(input.message, ownerId) || input.message.forwarded) {
         await context.telegram.edit(input.message, "只有账号本人可以修改IP显示设置"); return;
       }
       const operation = tail.then(async () => {

@@ -1,7 +1,7 @@
 import {definePlugin} from "../sdk";
 import {existsSync} from "node:fs";
 import path from "node:path";
-import {isPrivileged} from "../permissions";
+import {isOwnerOrGroupSendAs} from "../permissions";
 
 function escape(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -11,7 +11,7 @@ export default function createExec() {
   return definePlugin({apiVersion: 1, id: "exec", description: "受控执行系统命令",
     commands: {exec: {description: "执行一个非 shell 系统命令", async handle(invocation, ctx) {
       const [file, ...args] = invocation.args;
-      if (!await isPrivileged(invocation.message)) {
+      if (!isOwnerOrGroupSendAs(invocation.message, process.env.TB_OWNER_ID)) {
         await ctx.telegram.edit(invocation.message, "没有执行系统命令的权限");
         return;
       }
