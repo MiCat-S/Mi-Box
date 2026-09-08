@@ -197,7 +197,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
             brandText("<b>MiBot 更新</b>\n已有更新任务进行中，请稍后查看结果或稍后重试。"), htmlOptions);
           return;
         }
-        await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 更新</b>\n正在更新代码、依赖和插件…"), htmlOptions);
+        await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 更新</b>\n正在更新主程序、检查依赖并重建运行时…"), htmlOptions);
         await store(ctx).update(() => ({pending: receipt}));
         try {
           const statusRows = await readServiceStatusRows(ctx);
@@ -283,7 +283,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
       if (status === "success" || status === "failed") {
         await ctx.telegram.edit({id: pending.messageId, chatId: pending.chatId, text: "", outgoing: true},
           status === "success"
-            ? brandText("<b>MiBot 更新成功</b>\n代码、依赖和插件已更新，服务已重新上线。")
+            ? brandText("<b>MiBot 更新成功</b>\n主程序更新完成，服务已重启。")
             : brandText(`<b>MiBot 更新失败</b>\n服务保持当前版本。请查看 <code>.update check</code> 或服务器日志。${reason ? `\n原因：${escapeHtml(reason)}` : ""}`),
           htmlOptions);
         await clear(ctx, pending);
