@@ -272,6 +272,9 @@ export class ScopedHttp {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const parts: string[] = [];
+    const batchSize = 16 * 1024;
+    let batch: Uint8Array | undefined;
+    let buffered = 0;
     let total = 0;
     let done = false;
     let cancellation: Promise<void> | undefined;
@@ -291,8 +294,25 @@ export class ScopedHttp {
         // Fetch exposes decompressed bytes; Content-Length can describe compressed data or lie.
         total += chunk.value.byteLength;
         if (total > this.maxResponseBytes) throw new HttpError("RESPONSE_TOO_LARGE");
-        if (chunk.value.byteLength > 0) parts.push(decoder.decode(chunk.value, { stream: true }));
+        // Coalesce tiny transport chunks so retained strings scale with bytes,
+        // not with the number of network reads. Decode large chunks directly.
+        if (!buffered && chunk.value.byteLength >= batchSize) {
+          parts.push(decoder.decode(chunk.value, {stream: true}));
+        } else if (chunk.value.byteLength) {
+          batch ??= new Uint8Array(batchSize);
+          for (let offset = 0; offset < chunk.value.byteLength;) {
+            const length = Math.min(batchSize - buffered, chunk.value.byteLength - offset);
+            batch.set(chunk.value.subarray(offset, offset + length), buffered);
+            buffered += length;
+            offset += length;
+            if (buffered === batchSize) {
+              parts.push(decoder.decode(batch, {stream: true}));
+              buffered = 0;
+            }
+          }
+        }
       }
+      if (buffered) parts.push(decoder.decode(batch!.subarray(0, buffered), {stream: true}));
       parts.push(decoder.decode());
     } catch (error) {
       failure = safeError(error);

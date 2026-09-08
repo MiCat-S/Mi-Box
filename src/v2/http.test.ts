@@ -347,6 +347,36 @@ test("bounded text decodes split UTF-8, accepts the exact limit, and releases re
   await scope.drain();
 });
 
+test("fragmented text preserves UTF-8 across decoder batches, BOM and a truncated final character", async () => {
+  const scope = new ResourceScope();
+  const source = "\ufeff" + "a".repeat(16 * 1024 - 4) + "🚀中文" + "b".repeat(32 * 1024) + "\ufeffend";
+  const bytes = new Uint8Array([...new TextEncoder().encode(source), 0xf0, 0x9f]);
+  const chunks: Uint8Array[] = [];
+  // Enter with tiny reads, then cross from a partial batch to one large read.
+  for (let i = 0; i < 17; i++) chunks.push(bytes.subarray(i, i + 1));
+  chunks.push(new Uint8Array(), bytes.subarray(17, bytes.length - 1), bytes.subarray(-1));
+  const body = fixture(chunks);
+  const http = new ScopedHttp(scope, {maxResponseBytes: bytes.length, fetch: async () => body.response});
+  assert.equal(await http.text(URL_ONLY), source.slice(1) + "\ufffd");
+  assert.equal(body.body.locked, false);
+  assert.equal((await scope.drain()).completed, true);
+});
+
+test("one-byte UTF-8 chunks remain bounded and exact through multiple decode batches", async () => {
+  const scope = new ResourceScope();
+  const source = "👩🏽‍💻中文é".repeat(4096);
+  const bytes = new TextEncoder().encode(source);
+  let offset = 0;
+  const body = new ReadableStream<Uint8Array>({pull(controller) {
+    if (offset === bytes.length) controller.close();
+    else controller.enqueue(bytes.subarray(offset, ++offset));
+  }});
+  const http = new ScopedHttp(scope, {maxResponseBytes: bytes.length, fetch: async () => new Response(body)});
+  assert.equal(await http.text(URL_ONLY), source);
+  assert.equal(body.locked, false);
+  assert.equal((await scope.drain()).completed, true);
+});
+
 for (const length of [undefined, "1", "invalid", "999999999"]) {
   test(`actual bytes enforce the limit with Content-Length ${length ?? "absent"}`, async () => {
     const scope = new ResourceScope();

@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {KeyedExecutor, QueueFullError, ExecutorClosedError, ReentrantExecutionError} from "./executor";
 import {ResourceScope, SelfDrainError} from "./lifecycle";
+import {execFile} from "node:child_process";
+import path from "node:path";
+import {promisify} from "node:util";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -106,4 +109,24 @@ test("reentrant submissions reject instead of waiting for their own queue slot",
   assert.equal(await executor.submit('parent', () => 3), 3);
   await executor.close();
   await other.close();
+});
+
+test("settled tasks release payloads while their descendant timers remain active", async () => {
+  const {stdout} = await promisify(execFile)(process.execPath, ["--expose-gc",
+    path.resolve(__dirname, "../../scripts/memory-profile-v2.cjs"),
+    "--modules", __dirname, "--case", "executor"], {timeout: 15000});
+  const result = JSON.parse(stdout);
+  assert.equal(result.retainedPayloads, 0, "Finished task callbacks must not be retained by async context");
+});
+
+test("descendant work may submit after its originating task has settled", async () => {
+  const executor = new KeyedExecutor(1, 1);
+  const release = deferred();
+  let continuation!: Promise<number>;
+  await executor.submit("first", () => {
+    continuation = release.promise.then(() => executor.submit("next", () => 42));
+  });
+  release.resolve();
+  assert.equal(await continuation, 42);
+  await executor.close();
 });

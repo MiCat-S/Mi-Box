@@ -131,7 +131,8 @@ export class JsonStore<T extends RecordValue> {
     return this.admit(async () => {
       const before = await this.load(signal);
       signal?.throwIfAborted();
-      const changed = await mutator(structuredClone(before));
+      // load() parses a fresh document for each operation; it is already detached.
+      const changed = await mutator(before);
       signal?.throwIfAborted();
       if (!isRecord(changed)) throw new TypeError("JSON storage requires an object at the root");
       const bytes = stringify(changed) + "\n";

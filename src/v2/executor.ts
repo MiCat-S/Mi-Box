@@ -10,8 +10,12 @@ export class ReentrantExecutionError extends Error {
   constructor() { super("A running task cannot submit to its own executor; use an external coordinator"); this.name = "ReentrantExecutionError"; }
 }
 
-interface Job {
+interface ExecutionContext {
   active: boolean;
+}
+
+interface Job {
+  context: ExecutionContext;
   key: string;
   signal: AbortSignal;
   run: (signal: AbortSignal) => unknown | Promise<unknown>;
@@ -26,7 +30,9 @@ export class KeyedExecutor {
   private readonly controller = new AbortController();
   private readonly queue: Job[] = [];
   private readonly activeKeys = new Set<string>();
-  private readonly execution = new AsyncLocalStorage<Job>();
+  // Descendant timers may outlive a job. Retain only reentrancy state in ALS,
+  // never the callback, its payload or the submitting context snapshot.
+  private readonly execution = new AsyncLocalStorage<ExecutionContext>();
   private active = 0;
   private closed = false;
   private idleResolve?: () => void;
@@ -57,8 +63,9 @@ export class KeyedExecutor {
     const combined = signal ? AbortSignal.any([this.controller.signal, signal]) : this.controller.signal;
     return new Promise<T>((resolve, reject) => {
       const resume = AsyncLocalStorage.snapshot();
-      const job: Job = {active: false, key, signal: combined,
-        run: signal => resume(() => this.execution.run(job, () => run(signal))),
+      const context = {active: false};
+      const job: Job = {context, key, signal: combined,
+        run: signal => resume(() => this.execution.run(context, () => run(signal))),
         resolve: value => resolve(value as T), reject, detach: () => {}};
       const abort = () => {
         const index = this.queue.indexOf(job);
@@ -77,20 +84,20 @@ export class KeyedExecutor {
 
   private start(job: Job): void {
     this.active++;
-    job.active = true;
+    job.context.active = true;
     this.activeKeys.add(job.key);
     job.detach();
     void Promise.resolve().then(() => {
       job.signal.throwIfAborted();
       return job.run(job.signal);
     }).then(value => {
-      job.active = false;
+      job.context.active = false;
       this.active--;
       this.activeKeys.delete(job.key);
       this.pump();
       job.resolve(value);
     }, error => {
-      job.active = false;
+      job.context.active = false;
       this.active--;
       this.activeKeys.delete(job.key);
       this.pump();

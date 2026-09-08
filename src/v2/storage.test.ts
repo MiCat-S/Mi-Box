@@ -294,6 +294,27 @@ test("mutator and serialization failures roll back and leave the queue usable", 
   await store.close();
 });
 
+test("mutator documents and committed results never alias later reads or updates", async t => {
+  const {file} = await fixture(t);
+  const store = new JsonStore(file, {nested: {values: [1], id: 9007199254740993n}});
+  t.after(() => store.close());
+  let retained!: Awaited<ReturnType<typeof store.read>>;
+  const committed = await store.update(current => {
+    retained = current;
+    current.nested.values.push(2);
+    return current;
+  });
+  retained.nested.values.push(3);
+  committed.nested.values.push(4);
+  const expected = {nested: {values: [1, 2], id: 9007199254740993n}};
+  assert.deepEqual(await store.read(), expected);
+  await assert.rejects(store.update(current => {
+    current.nested.values.length = 0;
+    throw new Error("rollback nested mutation");
+  }), /rollback nested mutation/);
+  assert.deepEqual(await store.update(current => current), expected);
+});
+
 test("malformed or non-object files are reported, not replaced with defaults", async t => {
   const { file } = await fixture(t);
   const store = new JsonStore(file, { count: 0 });
