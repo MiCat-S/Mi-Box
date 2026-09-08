@@ -205,7 +205,7 @@ test("TPM repository search runs through the real host process limits", async t 
   assert.match(HTMLParser.parse(edits.at(-1)!)[0], /成功 2 · 跳过 0 · 失败 0/);
 });
 
-test("TPM installed list sorts and deduplicates into a compact expandable two-column message", async () => {
+test("TPM installed list sorts and deduplicates into a compact expandable three-column message", async () => {
   const sent: string[] = [];
   const context = {
     signal: new AbortController().signal,

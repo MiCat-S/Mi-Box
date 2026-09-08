@@ -23,14 +23,16 @@ function errorCode(error: unknown): string {
 async function compactList(ids: readonly string[]): Promise<readonly Html[]> {
   const sorted = [...new Set(ids)].sort();
   if (!sorted.length) return [text("没有匹配结果")];
-  const width = Math.min(18, Math.max(...sorted.map(id => id.length)));
+  const width = Math.min(12, Math.max(...sorted.map(id => id.length)));
   const blocks: Html[] = [];
   let body = "", rows = 0;
   for (let index = 0; index < sorted.length; index += 1) {
-    const first = sorted[index], second = sorted[index + 1];
-    const paired = first.length <= width && second !== undefined && second.length <= width;
-    const row = code(paired ? `${first.padEnd(width)}  ${second}` : first);
-    if (paired) index += 1;
+    const cells = [sorted[index]];
+    while (cells[0].length <= width && cells.length < 3 &&
+        sorted[index + 1] !== undefined && sorted[index + 1].length <= width) {
+      cells.push(sorted[++index]);
+    }
+    const row = code(cells.map((id, column) => column < cells.length - 1 ? id.padEnd(width) : id).join("  "));
     // Keep each expandable block within the renderer's HTML and entity budgets.
     if (body && (body.length + row.length + 1 > 2400 || rows === 60)) {
       blocks.push(...await richText(`<blockquote expandable>${body}</blockquote>`));
