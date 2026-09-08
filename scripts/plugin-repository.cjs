@@ -7,9 +7,9 @@ const {buildPlugin} = require('./build-v2-plugin.cjs');
 
 function run(action, ...targets) {
   const validId = value => /^[a-z][a-z0-9_-]{0,63}$/.test(value);
-  if (!['search', 'build', 'build-all'].includes(action) ||
+  if (!['search', 'build', 'build-all', 'build-selected'].includes(action) ||
       action === 'build' && (targets.length !== 1 || !validId(targets[0])) ||
-      action === 'build-all' && targets.some(id => !validId(id))) throw new Error('Invalid plugin request');
+      ['build-all', 'build-selected'].includes(action) && targets.some(id => !validId(id))) throw new Error('Invalid plugin request');
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'mibot-plugins-'));
   try {
     const repository = path.join(stage, 'repository');
@@ -30,18 +30,21 @@ function run(action, ...targets) {
     const id = targets[0];
     if (action === 'build' && !ids.includes(id)) throw new Error('V2 plugin not available');
     const excluded = new Set(targets);
-    const selected = action === 'build' ? [id] : ids.filter(value => !excluded.has(value));
-    if (!selected.length) return {ids, candidates: []};
+    const selected = action === 'build' ? [id] : action === 'build-selected'
+      ? [...new Set(targets)].filter(value => ids.includes(value)) : ids.filter(value => !excluded.has(value));
+    const missing = action === 'build-selected'
+      ? [...new Set(targets)].filter(value => !ids.includes(value)).map(id => ({id, error: 'NOT_AVAILABLE'})) : [];
+    if (!selected.length) return {ids, candidates: missing};
     git(['sparse-checkout', 'set', '--no-cone', ...selected.flatMap(value => [`/${value}/v2.ts`, `/${value}/v2/`])], repository);
     git(['checkout', 'HEAD'], repository);
-    if (action === 'build-all') {
+    if (action === 'build-all' || action === 'build-selected') {
       const candidates = selected.map(id => {
         try {
           const {manifest} = buildPlugin({id, packageRoot: path.join(repository, id), entry: 'v2.ts'});
           return {id, revision: manifest.revision};
         } catch { return {id, error: 'BUILD'}; }
       });
-      return {ids, candidates};
+      return {ids, candidates: [...candidates, ...missing]};
     }
     const {manifest} = buildPlugin({id, packageRoot: path.join(repository, id), entry: 'v2.ts'});
     return {id, revision: manifest.revision};

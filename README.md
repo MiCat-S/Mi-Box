@@ -39,10 +39,12 @@ npm start
 .tpm install all
 .tpm list
 .tpm update dig
+.tpm update all
 .tpm remove dig
+.tpm remove all
 ```
 
-`.tpm install all` 一次下载仓库并安装全部可用 V2 扩展，跳过已加载和默认模块。单个插件安装失败后会继续处理其余插件，并汇总结果。TPM 管理命令支持账号本人在群内使用频道身份发送的新消息。
+`.tpm install all` 一次下载仓库并安装全部可用 V2 扩展，跳过已加载和默认模块。单个插件安装失败后会继续处理其余插件，并汇总结果。`.tpm update all` 一次下载仓库并更新全部已安装扩展；`.tpm remove all` 卸载全部已安装扩展并保留配置数据。两者均逐个处理，单个失败后继续并汇总结果。TPM 管理命令支持账号本人在群内使用频道身份发送的新消息。
 
 TPM 仅允许账号所有者管理扩展。安装和更新从配套插件仓库的 main
 下载源码，短时构建后加载；安装记录会在服务重启时恢复。

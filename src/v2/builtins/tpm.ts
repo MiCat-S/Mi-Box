@@ -53,7 +53,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
   let busy = false;
   const repository = async (ctx: PluginContext, action: string, ...ids: string[]) => {
     const result = await ctx.processes.run(process.execPath, [path.join(root, "scripts/plugin-repository.cjs"), action, ...ids],
-      {timeoutMs: action === "build-all" ? 180000 : 30000, maxOutputBytes: 65536});
+      {timeoutMs: ["build-all", "build-selected"].includes(action) ? 180000 : 30000, maxOutputBytes: 65536});
     return JSON.parse(result.stdout.toString("utf8")) as {ids?: string[]; id?: string; revision?: string; candidates?: Candidate[]};
   };
   return definePlugin({apiVersion: 1, id: "tpm", description: "安装、卸载和更新 V2 扩展插件",
@@ -64,7 +64,9 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       command(prefix, "tpm", "install all"), text(" · 安装全部可用扩展，跳过已加载和默认模块\n"),
       command(prefix, "tpm", "list"), text(" · 查看已安装扩展\n"),
       command(prefix, "tpm", "update 插件名"), text(" · 更新扩展\n"),
-      command(prefix, "tpm", "remove 插件名"), text(" · 卸载扩展并保留配置\n批量安装会继续处理失败后的插件，并汇总结果。"),
+      command(prefix, "tpm", "update all"), text(" · 更新全部已安装扩展\n"),
+      command(prefix, "tpm", "remove all"), text(" · 卸载全部已安装扩展并保留配置\n"),
+      command(prefix, "tpm", "remove 插件名"), text(" · 卸载扩展并保留配置\n批量操作会继续处理失败后的插件，并汇总结果。"),
     ),
     commands: {tpm: {description: "管理插件仓库中的 V2 扩展", ignoreEdited: true, async handle(invocation, ctx) {
       const [raw = "list", id] = invocation.args;
@@ -85,7 +87,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       }
       if (busy) {await ctx.telegram.edit(invocation.message, "插件管理任务正在执行，请稍后再试"); return;}
       if (!["search", "s", "install", "i", "remove", "rm", "update"].includes(sub)) {
-        await ctx.telegram.edit(invocation.message, `${invocation.prefix}tpm search [关键词]\n${invocation.prefix}tpm install|remove|update 插件名\n${invocation.prefix}tpm install all\n${invocation.prefix}tpm list`); return;
+        await ctx.telegram.edit(invocation.message, `${invocation.prefix}tpm search [关键词]\n${invocation.prefix}tpm install|remove|update 插件名\n${invocation.prefix}tpm install|update|remove all\n${invocation.prefix}tpm list`); return;
       }
       if (!["search", "s"].includes(sub) && (!id || !/^[a-z][a-z0-9_-]{0,63}$/.test(id) || invocation.args.length !== 2)) {
         await ctx.telegram.edit(invocation.message, "请提供一个有效的插件名"); return;
@@ -108,27 +110,43 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           }
           return;
         }
-        if ((sub === "install" || sub === "i") && id === "all") {
+        if (id === "all" && ["install", "i", "update", "remove", "rm"].includes(sub)) {
+          const updating = sub === "update";
+          const removing = sub === "remove" || sub === "rm";
+          const verb = removing ? "卸载" : updating ? "更新" : "安装";
+          const targets = [...new Set(releases.snapshot().generations.map(item => item.id))].sort();
+          if ((updating || removing) && !targets.length) {
+            await ctx.telegram.edit(invocation.message, "没有已安装的扩展插件", htmlOptions); return;
+          }
           await ctx.telegram.edit(invocation.message,
-            renderFeedback({state: "working", title: "正在下载并构建全部可安装扩展…"}), htmlOptions);
+            renderFeedback({state: "working", title: removing ? "正在卸载全部已安装扩展…" : updating ? "正在下载并构建已安装扩展…" : "正在下载并构建全部可安装扩展…"}), htmlOptions);
           const excluded = new Set(host.listPlugins().map(plugin => plugin.id).filter(validId));
-          const result = await repository(ctx, "build-all", ...excluded);
+          const result = removing ? {ids: targets, candidates: targets.map(id => ({id}) as Candidate)}
+            : updating ? await repository(ctx, "build-selected", ...targets)
+            : await repository(ctx, "build-all", ...excluded);
           if (!Array.isArray(result.ids) || !Array.isArray(result.candidates) ||
               result.ids.some(value => typeof value !== "string" || !validId(value)) ||
               result.candidates.some(value => !value || typeof value.id !== "string" || !validId(value.id))) {
             throw new Error("Invalid candidates");
           }
-          stage = "activate";
+          if (updating && (result.candidates.length !== targets.length ||
+              new Set(result.candidates.map(item => item.id)).size !== targets.length ||
+              result.candidates.some(item => !targets.includes(item.id)))) throw new Error("Invalid update candidates");
+          stage = removing ? "unload" : "activate";
           const installedIds: string[] = [];
-          const skipped = new Set(result.ids.filter(value => excluded.has(value)));
+          const skipped = new Set(updating || removing ? [] : result.ids.filter(value => excluded.has(value)));
           const failed: {id: string; code: string}[] = [];
           for (const [index, candidate] of result.candidates.entries()) {
             ctx.signal.throwIfAborted();
-            if (host.pluginState(candidate.id)) {skipped.add(candidate.id); continue;}
+            if (!updating && !removing && host.pluginState(candidate.id)) {skipped.add(candidate.id); continue;}
             let failure: string | undefined;
-            if (candidate.error || !candidate.revision) failure = "BUILD";
+            if (!removing && (candidate.error || !candidate.revision)) failure = candidate.error === "NOT_AVAILABLE" ? "NOT_AVAILABLE" : "BUILD";
             else {
-              try {await releases.activate(candidate.id, candidate.revision); installedIds.push(candidate.id);}
+              try {
+                if (removing) await releases.remove(candidate.id);
+                else await releases.activate(candidate.id, candidate.revision!);
+                installedIds.push(candidate.id);
+              }
               catch (error) {ctx.signal.throwIfAborted(); failure = errorCode(error);}
             }
             if (failure) {
@@ -136,19 +154,20 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
               ctx.log.error("tpm.batch_failed", {id: candidate.id, code: failure});
             }
             if ((index + 1) % 10 === 0) await ctx.telegram.edit(invocation.message, renderFeedback({
-              state: "working", title: `正在安装扩展 ${index + 1}/${result.candidates.length}`,
+              state: "working", title: `正在${verb}扩展 ${index + 1}/${result.candidates.length}`,
               detail: `成功 ${installedIds.length} · 失败 ${failed.length}`,
             }), htmlOptions);
           }
           const output = await renderDocument({
-            title: `${getBotName()} 插件批量安装完成`,
+            title: `${getBotName()} 插件批量${verb}完成`,
             subtitle: `成功 ${installedIds.length} · 跳过 ${skipped.size} · 失败 ${failed.length}`,
             sections: [
-              section("已安装", installedIds.length ? installedIds.map(id => code(id)) : [text("无新增插件")]),
+              section(`已${verb}`, installedIds.length ? installedIds.map(id => code(id)) : [text(`无${verb}成功的插件`)]),
               ...(skipped.size ? [section("已安装或默认模块", [...skipped].sort().map(id => code(id)))] : []),
-              ...(failed.length ? [section("安装失败", failed.map(item => concat(code(item.id), text(` · ${item.code}`))))] : []),
+              ...(failed.length ? [section(`${verb}失败`, failed.map(item => concat(code(item.id), text(` · ${item.code}`))))] : []),
             ],
-            footer: [concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
+            footer: [...(removing ? [text("插件配置数据已保留")] : []),
+              concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
           });
           for (const [index, page] of output.entries()) {
             ctx.signal.throwIfAborted();
