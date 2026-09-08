@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {Api} from "teleproto";
+import {returnBigInt} from "teleproto/Helpers";
+import {messageEnvelope} from "../telegram";
 import createUpdate from "./update";
 import type {CommandInvocation, MessageEnvelope, PluginContext} from "../sdk";
 
 type RunResult = {stdout?: string; stderr?: string; exitCode?: number; error?: unknown};
+
+function channelMessage(options: Partial<ConstructorParameters<typeof Api.Message>[0]> = {}) {
+  return messageEnvelope(new Api.Message({id: 1, date: 1,
+    peerId: new Api.PeerChannel({channelId: returnBigInt(456)}),
+    fromId: new Api.PeerChannel({channelId: returnBigInt(789)}),
+    out: true, message: ".update check", ...options,
+  }), {selfId: "123"});
+}
 
 function fixture(outputs: RunResult[] = [], options: {sender?: string} = {}) {
   const controller = new AbortController();
@@ -77,6 +88,47 @@ test("非所有者无法发起更新", async (t) => {
   t.after(f.restore);
   await createUpdate(undefined, "123").commands.update.handle(f.inv, f.ctx);
   assert.match(f.edits[0], /只有账号所有者/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("本账号以频道皮套发送的更新命令通过身份检查", async t => {
+  const f = fixture();
+  t.after(f.restore);
+  Object.defineProperty(process, "getuid", {value: () => 0, configurable: true});
+  const envelope = channelMessage();
+  assert.equal(envelope.senderId, "-100789");
+  await createUpdate("/fixture", "123").commands.update.handle({...f.inv, args: ["check"], message: envelope}, f.ctx);
+  assert.deepEqual(f.calls, [["/usr/bin/git", "-C", "/fixture", "fetch", "origin", "main"]]);
+  assert.match(f.edits.at(-1)!, /更新检查完成/);
+});
+
+test("皮套身份支持默认更新与 now 命令", async t => {
+  const f = fixture();
+  t.after(f.restore);
+  Object.defineProperty(process, "getuid", {value: () => 1000, configurable: true});
+  for (const args of [[], ["run"], ["now"]]) {
+    await createUpdate(undefined, "123").commands.update.handle({...f.inv, args,
+      message: channelMessage()}, f.ctx);
+    assert.match(f.edits.at(-1)!, /当前进程 UID=1000/);
+  }
+});
+
+test("他人频道消息、转发与缺失所有者配置不能通过皮套更新授权", async t => {
+  const f = fixture();
+  t.after(f.restore);
+  const channel = channelMessage();
+  for (const [message, owner] of [
+    [{...channel, outgoing: false}, "123"],
+    [{...channel, forwarded: true}, "123"],
+    [channelMessage({editDate: 2}), "123"],
+    [channelMessage({post: true}), "123"],
+    [{...channel, raw: undefined}, "123"],
+    [channel, ""],
+    [{...channel, senderId: undefined}, "123"],
+  ] as const) {
+    await createUpdate(undefined, owner).commands.update.handle({...f.inv, message}, f.ctx);
+    assert.match(f.edits.at(-1)!, /只有账号所有者/);
+  }
   assert.equal(f.calls.length, 0);
 });
 

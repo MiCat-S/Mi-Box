@@ -172,7 +172,12 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
         return;
       }
       if (sub === "run" || sub === "now" || sub === "check") {
-        if (!isOwner(invocation.message, ownerId)) {
+        // Only fresh group send-as messages: edits and broadcast posts do not prove the current operator.
+        const raw = invocation.message.raw as {className?: string; post?: boolean} | undefined;
+        const sentAsChannel = invocation.message.outgoing && !invocation.message.forwarded && !invocation.message.edited &&
+          raw?.className === "Message" && !raw.post && /^-100[1-9][0-9]*$/.test(invocation.message.chatId) &&
+          /^-100[1-9][0-9]*$/.test(invocation.message.senderId ?? "") && /^[1-9][0-9]*$/.test(ownerId ?? "");
+        if (!isOwner(invocation.message, ownerId) && !sentAsChannel) {
           await ctx.telegram.edit(invocation.message, brandText("只有账号所有者可以更新 MiBot", false));
           return;
         }
