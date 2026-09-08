@@ -10,6 +10,7 @@ import {DEFAULT_PROCESS_LIMITS, resolveProcessLimits, ScopedProcesses, type Proc
 import {SettingsRegistry} from "./settings";
 import {ScopedFiles} from "./files";
 import { definePlugin, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type TelegramPort } from "./sdk";
+import {renderRichText} from "./ui/document";
 
 interface PluginStorage { json: StorageRoot; sqlite: Map<string, {store: SqliteStore; readonly: boolean; timeoutMs: number}>; }
 interface LoadedPlugin { definition: PluginDefinition; scope: ResourceScope; storage: PluginStorage; context: PluginContext; ready: boolean; owner?: object; }
@@ -351,6 +352,17 @@ export class PluginHost {
     const plugin = target.plugin;
     return plugin.scope.run(`command:${target.name}`, () => this.executor.submit(message.chatId, async () => {
       plugin.scope.signal.throwIfAborted();
+      const explicitHelp = parsed.args.length === 1 && ["--help", ...(command.helpArgs ?? [])].includes(parsed.args[0].toLowerCase());
+      if (plugin.definition.renderHelp && (explicitHelp || (!parsed.args.length && command.helpOnEmpty))) {
+        const pages = await renderRichText(plugin.definition.renderHelp(parsed.prefix));
+        for (const [index, page] of pages.entries()) {
+          plugin.scope.signal.throwIfAborted();
+          const options = {parseMode: "html", linkPreview: false} as const;
+          if (index === 0) await plugin.context.telegram.edit(snapshot, page, options);
+          else await plugin.context.telegram.reply(snapshot, page, options);
+        }
+        return true;
+      }
       await command.handle({message: snapshot, command: target.name, prefix: parsed.prefix, args: Object.freeze(parsed.args)}, plugin.context);
       return true;
     }, plugin.scope.signal));

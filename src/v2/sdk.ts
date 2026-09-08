@@ -95,6 +95,10 @@ export interface CommandInvocation {
 
 export interface CommandDefinition {
   readonly description: string;
+  /** Show the plugin's help when this command has no arguments. */
+  readonly helpOnEmpty?: boolean;
+  /** Additional single-argument help requests, preserving command-specific syntax. */
+  readonly helpArgs?: readonly string[];
   readonly ignoreEdited?: boolean;
   handle(invocation: CommandInvocation, context: PluginContext): void | Promise<void>;
 }
@@ -118,7 +122,7 @@ export interface PluginDefinition {
   readonly apiVersion: typeof PLUGIN_API_VERSION;
   readonly id: string;
   readonly description: string;
-  /** Generate plugin-authored help HTML for the prefix used to request it. */
+  /** Help HTML for the current prefix; also handles exact --help requests. */
   readonly renderHelp?: (prefix: string) => string;
   readonly commands: Readonly<Record<string, CommandDefinition>>;
   readonly listeners?: readonly MessageListener[];
@@ -144,7 +148,9 @@ export function definePlugin(definition: PluginDefinition): PluginDefinition {
     if (!/^[a-z0-9_]+$/i.test(name) || !value || typeof value.handle !== "function" || typeof value.description !== "string") {
       throw new Error(`Invalid command definition: ${name}`);
     }
-    commands[name] = Object.freeze({...value});
+    if (value.helpOnEmpty !== undefined && typeof value.helpOnEmpty !== "boolean") throw new Error("Invalid empty-command help policy");
+    if (value.helpArgs !== undefined && (!Array.isArray(value.helpArgs) || value.helpArgs.some(arg => typeof arg !== "string" || !arg || /\s/.test(arg)))) throw new Error("Invalid command help arguments");
+    commands[name] = Object.freeze({...value, ...(value.helpArgs ? {helpArgs: Object.freeze([...value.helpArgs])} : {})});
   }
   if (definition.listeners?.some(listener => typeof listener?.handle !== "function")) throw new Error("Invalid message listener");
   if (definition.renderHelp !== undefined && typeof definition.renderHelp !== "function") throw new Error("Invalid help renderer");

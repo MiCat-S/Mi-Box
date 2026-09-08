@@ -134,6 +134,12 @@ export async function richText(source: string): Promise<readonly Html[]> {
   return description(source).map(block => asHtml(block.html));
 }
 
+/** Preserve complete authored help while respecting Telegram message budgets. */
+export async function renderRichText(source: string): Promise<readonly string[]> {
+  const {description} = await parserTools();
+  return paginate(description(source));
+}
+
 function appendBlocks(target: Block[], source: string, normalize: (source: string) => Block[]): void {
   // Generated Html is normalized once, never escaped a second time, and
   // complete tags remain page-local.

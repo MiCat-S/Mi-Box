@@ -128,6 +128,40 @@ test("primary admission and edited-message defaults preserve owner boundary", as
   assert.equal(calls, 1);
 });
 
+test("plugin help shares one renderer, paginates bodies, and performs no command work", async t => {
+  const output: {kind: string; text: string}[] = [];
+  const unavailable = async () => { assert.fail("help must not access Telegram data"); };
+  const {host} = await fixture(t, {prefixes: ["<&"], telegram: {
+    async edit(_message, text, options) { assert.equal(options.parseMode, "html"); output.push({kind: "edit", text}); },
+    async reply(_message, text, options) { assert.equal(options.parseMode, "html"); output.push({kind: "reply", text}); },
+    invoke: unavailable, getReply: unavailable, withClient: unavailable,
+  }});
+  let calls = 0;
+  const sections = Array.from({length: 8}, (_, i) => `<b>分类 ${i}</b>\n<blockquote expandable>${`内容 ${i} `.repeat(80)}</blockquote>`);
+  await host.load(definePlugin({apiVersion: 1, id: "guide", description: "完整指南",
+    renderHelp: prefix => `<code>${prefix.replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"})[c]!)}guide</code>\n${sections.join("\n")}`,
+    commands: {guide: {description: "显示指南", helpOnEmpty: true, helpArgs: ["help", "h"], handle() {calls++;}},
+      action: {description: "执行操作", handle() {calls++;}}},
+  }));
+  for (const command of ["guide", "guide help", "guide h", "action --help"]) {
+    output.length = 0;
+    assert.equal(await host.dispatchPrimary({...envelope, text: `<&${command}`}), true);
+    assert.ok(output.length > 1);
+    assert.equal(output[0].kind, "edit");
+    assert.ok(output.slice(1).every(page => page.kind === "reply"));
+    assert.ok(output.every(page => page.text.length <= 3500));
+    const all = output.map(page => page.text).join("\n");
+    assert.ok(all.includes("&lt;&amp;guide"));
+    for (const section of sections) assert.ok(all.includes(section), "every help section and body must survive pagination");
+  }
+  assert.equal(calls, 0);
+  await host.dispatchPrimary({...envelope, text: "<&action"});
+  await host.dispatchPrimary({...envelope, text: "<&action help with extra text"});
+  await host.dispatchPrimary({...envelope, text: "<&action h"});
+  await host.dispatchPrimary({...envelope, text: "<&action help"});
+  assert.equal(calls, 4, "ordinary inputs retain command behavior");
+});
+
 test("listener subscription is independent of command owner admission", async t => {
   const {host} = await fixture(t);
   const received: MessageEnvelope[] = [];
