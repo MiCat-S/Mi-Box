@@ -26,30 +26,43 @@ function run(action, ...targets) {
     const ids = git(['ls-tree', '-r', '--name-only', 'HEAD'], repository).split('\n')
       .filter(file => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/v2\.ts$/.test(file))
       .map(file => file.split('/')[0]).sort();
-    if (action === 'search') return {ids};
+    // Case-fold collisions are a repository anomaly: two declared ids that only
+    // differ by case would map to the same path on case-insensitive filesystems.
+    const folded = new Map();
+    for (const id of ids) {
+      const key = id.toLowerCase();
+      const group = folded.get(key) ?? [];
+      group.push(id);
+      folded.set(key, group);
+    }
+    const collisions = [...folded.values()].filter(group => group.length > 1);
+    if (action === 'search') return {ids, collisions};
     // Resolve user input to the declared id so configuration paths keep their
-    // original spelling (for example git_pr -> git_PR). Exact matches win.
+    // original spelling (for example git_pr -> git_PR). Exact matches win;
+    // only a non-exact case-fold collision is reported as AMBIGUOUS.
     const resolve = value => {
-      if (ids.includes(value)) return value;
+      if (ids.includes(value)) return {id: value};
       const matches = ids.filter(name => name.toLowerCase() === value.toLowerCase());
-      if (matches.length > 1) throw new Error('Ambiguous plugin id');
-      return matches[0];
+      if (!matches.length) return {error: 'NOT_FOUND'};
+      if (matches.length > 1) return {error: 'AMBIGUOUS', ids: matches};
+      return {id: matches[0]};
     };
     if (action === 'build') {
-      const id = resolve(targets[0]);
-      if (!id) throw new Error('V2 plugin not available');
+      const resolved = resolve(targets[0]);
+      if (resolved.error) return {id: targets[0], ...resolved};
+      const id = resolved.id;
       git(['sparse-checkout', 'set', '--no-cone', `/${id}/v2.ts`, `/${id}/v2/`], repository);
       git(['checkout', 'HEAD'], repository);
       const {manifest} = buildPlugin({id, packageRoot: path.join(repository, id), entry: 'v2.ts'});
       return {id, revision: manifest.revision};
     }
     const excluded = new Set(action === 'build-all' ? targets : []);
-    const requested = action === 'build-selected' ? targets.map(value => ({raw: value, id: resolve(value)})) : [];
+    const requested = action === 'build-selected' ? targets.map(value => ({raw: value, ...resolve(value)})) : [];
     const selected = action === 'build-all' ? ids.filter(value => !excluded.has(value))
       : [...new Set(requested.map(item => item.id).filter(Boolean))];
     const missing = action === 'build-selected'
-      ? requested.filter(item => !item.id).map(item => ({id: item.raw, error: 'NOT_AVAILABLE'})) : [];
-    if (!selected.length) return {ids, candidates: missing};
+      ? requested.filter(item => item.error).map(item => ({id: item.raw, error: item.error, ...(item.ids ? {ids: item.ids} : {})})) : [];
+    if (!selected.length) return {ids, collisions, candidates: missing};
     git(['sparse-checkout', 'set', '--no-cone', ...selected.flatMap(value => [`/${value}/v2.ts`, `/${value}/v2/`])], repository);
     git(['checkout', 'HEAD'], repository);
     const candidates = selected.map(id => {
@@ -58,7 +71,7 @@ function run(action, ...targets) {
         return {id, revision: manifest.revision};
       } catch { return {id, error: 'BUILD'}; }
     });
-    return {ids, candidates: [...candidates, ...missing]};
+    return {ids, collisions, candidates: [...candidates, ...missing]};
   } finally {fs.rmSync(stage, {recursive: true, force: true});}
 }
 if (require.main === module) {

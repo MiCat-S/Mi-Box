@@ -62,7 +62,7 @@ test('selected batch builds installed targets once and reports missing entries i
   const result = f.run('build-selected', 'dig', 'absent', 'bad', 'dig');
   assert.deepEqual(f.built, ['dig', 'bad']);
   assert.deepEqual(result.candidates, [
-    {id: 'dig', revision: 'a'.repeat(64)}, {id: 'bad', error: 'BUILD'}, {id: 'absent', error: 'NOT_AVAILABLE'},
+    {id: 'dig', revision: 'a'.repeat(64)}, {id: 'bad', error: 'BUILD'}, {id: 'absent', error: 'NOT_FOUND'},
   ]);
   assert.equal(f.gitCalls.filter(args => args[0] === 'clone').length, 1);
   assert.deepEqual(f.gitCalls.find(args => args[0] === 'sparse-checkout'),
@@ -72,7 +72,7 @@ test('selected batch builds installed targets once and reports missing entries i
 
 test('unavailable selected batch reports all targets without checking out source', t => {
   const f = fixture(t);
-  assert.deepEqual(f.run('build-selected', 'absent').candidates, [{id: 'absent', error: 'NOT_AVAILABLE'}]);
+  assert.deepEqual(f.run('build-selected', 'absent').candidates, [{id: 'absent', error: 'NOT_FOUND'}]);
   assert.equal(f.gitCalls.some(args => args[0] === 'checkout'), false);
   assert.deepEqual(f.built, []);
   assert.equal(f.cleaned(), true);
@@ -82,16 +82,22 @@ test('unavailable selected batch reports all targets without checking out source
 test('declared ids may contain upper case and resolve case-insensitively', t => {
   const f = fixture(t, new Set(), 'git_PR/v2.ts\n');
   assert.ok(f.run('search').ids.includes('git_PR'));
+  assert.deepEqual(f.run('search').collisions, []);
   assert.deepEqual(f.run('build', 'git_pr'), {id: 'git_PR', revision: 'a'.repeat(64)});
+  assert.deepEqual(f.run('build', 'missing'), {id: 'missing', error: 'NOT_FOUND'});
   assert.deepEqual(f.built, ['git_PR']);
   assert.deepEqual(f.gitCalls.find(args => args[0] === 'sparse-checkout'),
     ['sparse-checkout', 'set', '--no-cone', '/git_PR/v2.ts', '/git_PR/v2/']);
   assert.equal(f.cleaned(), true);
 });
 
-test('case collisions are rejected instead of resolved arbitrarily', t => {
+test('case collisions are reported with declared ids and exact matches still build', t => {
   const f = fixture(t, new Set(), 'git_PR/v2.ts\nGIT_pr/v2.ts\n');
-  assert.throws(() => f.run('build', 'git_pr'), /Ambiguous plugin id/);
+  assert.deepEqual(f.run('search').collisions, [['GIT_pr', 'git_PR']]);
+  assert.deepEqual(f.run('build', 'git_pr'), {id: 'git_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']});
   assert.deepEqual(f.built, []);
+  assert.deepEqual(f.run('build', 'git_PR'), {id: 'git_PR', revision: 'a'.repeat(64)});
+  assert.deepEqual(f.run('build-selected', 'git_pr', 'GIT_pr'), {ids: ['GIT_pr', 'ai', 'bad', 'dig', 'git_PR', 'weather'], collisions: [['GIT_pr', 'git_PR']],
+    candidates: [{id: 'GIT_pr', revision: 'a'.repeat(64)}, {id: 'git_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']}]});
   assert.equal(f.cleaned(), true);
 });

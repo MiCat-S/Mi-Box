@@ -22,6 +22,6 @@ test("user input resolves to the declared id without changing stored spelling", 
 
 test("case collisions are reported instead of resolved arbitrarily", () => {
   const ids = ["git_PR", "GIT_pr", "ai"];
-  assert.deepEqual(resolvePluginId("git_pr", ids), {error: "AMBIGUOUS"});
+  assert.deepEqual(resolvePluginId("git_pr", ids), {error: "AMBIGUOUS", ids: ["git_PR", "GIT_pr"]});
   assert.deepEqual(resolvePluginId("git_PR", ids), {id: "git_PR"});
 });

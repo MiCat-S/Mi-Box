@@ -5,12 +5,12 @@ import type {PluginHost} from "../host";
 import type {PluginReleases} from "../releases";
 import {isOwnerOrGroupSendAs} from "../permissions";
 import {code, command, concat, text, type Html} from "../ui/text";
-import {renderDocument, richText, section} from "../ui/document";
+import {PAGE_LABEL_RESERVE, pageLabel, renderDocument, richText, section} from "../ui/document";
 import {renderFeedback} from "../ui/feedback";
 import {isPluginId, resolvePluginId} from "../plugin-id";
 
 const htmlOptions = {parseMode: "html", linkPreview: false} as const;
-type Candidate = {id: string; revision?: string; error?: string};
+type Candidate = {id: string; revision?: string; error?: string; ids?: string[]};
 
 function errorCode(error: unknown): string {
   const allowed = new Set(["STATE", "CONFLICT", "STOP", "ACTIVATE", "RESTORE", "SPAWN_FAILED",
@@ -61,8 +61,8 @@ async function listView(
       text(hint),
       concat(text("用法："), command(prefix, "tpm", title === "已安装扩展" ? "search [关键词]" : "install 插件名")),
     ],
-  });
-  return output.map((page, index) => output.length > 1 ? `${page}\n${index + 1}/${output.length} 页` : page);
+  }, PAGE_LABEL_RESERVE);
+  return output.map((page, index) => page + pageLabel(index, output.length));
 }
 
 export default function createTpm(host: PluginHost, releases: PluginReleases, root: string, ownerId: string) {
@@ -70,7 +70,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
   const repository = async (ctx: PluginContext, action: string, ...ids: string[]) => {
     const result = await ctx.processes.run(process.execPath, [path.join(root, "scripts/plugin-repository.cjs"), action, ...ids],
       {timeoutMs: ["build-all", "build-selected"].includes(action) ? 180000 : 30000, maxOutputBytes: 65536});
-    return JSON.parse(result.stdout.toString("utf8")) as {ids?: string[]; id?: string; revision?: string; candidates?: Candidate[]};
+    return JSON.parse(result.stdout.toString("utf8")) as {ids?: string[]; collisions?: string[][]; id?: string; revision?: string; error?: string; candidates?: Candidate[]};
   };
   return definePlugin({apiVersion: 1, id: "tpm", description: "安装、卸载和更新 V2 扩展插件",
     renderHelp: prefix => concat(
@@ -156,7 +156,10 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
             ctx.signal.throwIfAborted();
             if (!updating && !removing && host.pluginState(candidate.id)) {skipped.add(candidate.id); continue;}
             let failure: string | undefined;
-            if (!removing && (candidate.error || !candidate.revision)) failure = candidate.error === "NOT_AVAILABLE" ? "NOT_AVAILABLE" : "BUILD";
+            if (!removing && (candidate.error || !candidate.revision)) {
+              failure = candidate.error === "AMBIGUOUS" ? "AMBIGUOUS"
+                : candidate.error === "NOT_FOUND" || candidate.error === "NOT_AVAILABLE" ? "NOT_AVAILABLE" : "BUILD";
+            }
             else {
               try {
                 if (removing) await releases.remove(candidate.id);
@@ -184,23 +187,33 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
             ],
             footer: [...(removing ? [text("插件配置数据已保留")] : []),
               concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
-          });
+          }, PAGE_LABEL_RESERVE);
           for (const [index, page] of output.entries()) {
             ctx.signal.throwIfAborted();
-            if (!index) await ctx.telegram.edit(invocation.message, page, htmlOptions);
-            else await ctx.telegram.reply(invocation.message, page, htmlOptions);
+            const labelled = page + pageLabel(index, output.length);
+            if (!index) await ctx.telegram.edit(invocation.message, labelled, htmlOptions);
+            else await ctx.telegram.reply(invocation.message, labelled, htmlOptions);
           }
           return;
         }
         const installedIds = releases.snapshot().generations.map(item => item.id);
+        const defaultIds = host.listPlugins().map(plugin => plugin.id);
+        // Resolve default modules locally before touching the repository so a
+        // builtin such as help never triggers a network build attempt.
+        const defaultFor = (input: string): string | undefined => {
+          if (host.pluginState(input)) return input;
+          const matches = defaultIds.filter(name => name.toLowerCase() === input.toLowerCase());
+          return matches.length === 1 ? matches[0] : undefined;
+        };
+        const localDefault = defaultFor(id);
+        if (localDefault && !installedIds.includes(localDefault)) {
+          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
+        }
         if (sub === "remove" || sub === "rm") {
-          if (host.pluginState(id) && !installedIds.includes(id)) {
-            await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
-          }
           const resolved = resolvePluginId(id, installedIds);
           if ("error" in resolved) {
             await ctx.telegram.edit(invocation.message, resolved.error === "AMBIGUOUS"
-              ? `插件名 ${id} 存在大小写冲突，请使用完整名称`
+              ? `插件名 ${id} 存在大小写冲突：${resolved.ids.join("、")}；请使用完整名称`
               : `未安装扩展 ${id}`);
             return;
           }
@@ -214,6 +227,13 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           await ctx.telegram.edit(invocation.message,
             renderFeedback({state: "working", title: `正在下载并构建 ${id}…`}), htmlOptions);
           const candidate = await repository(ctx, "build", id);
+          if (candidate.error === "AMBIGUOUS") {
+            await ctx.telegram.edit(invocation.message,
+              `插件名 ${id} 存在大小写冲突：${(candidate.ids ?? []).join("、")}；请使用完整名称`); return;
+          }
+          if (candidate.error === "NOT_FOUND") {
+            await ctx.telegram.edit(invocation.message, `插件 ${id} 不存在或不可用`); return;
+          }
           const canonical = candidate.id;
           if (!canonical || !isPluginId(canonical) || !candidate.revision) throw new Error("Invalid candidate");
           const installed = installedIds.includes(canonical);

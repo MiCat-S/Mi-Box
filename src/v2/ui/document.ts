@@ -6,6 +6,52 @@ const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, characte
 
 export const MAX_HTML_LENGTH = 3_500;
 export const MAX_ENTITIES = 90;
+/** Bytes reserved so an appended page label never pushes a page over the budget. */
+export const PAGE_LABEL_RESERVE = 16;
+
+/**
+ * Unified page suffix for paginated plugin output. It stays empty for a single
+ * page so single-page replies keep their original text.
+ */
+export function pageLabel(index: number, total: number): string {
+  return total > 1 ? `\n${index + 1}/${total} 页` : "";
+}
+
+export interface PageDelivery {
+  readonly published: number;
+  readonly total: number;
+  readonly interrupted: boolean;
+  readonly error?: unknown;
+}
+
+/**
+ * Deliver paginated content: the first page edits the original message and the
+ * rest reply to it. A failure after the first page never overwrites the already
+ * published result; the caller reports the interruption separately. Abort
+ * reasons are rethrown so the caller can distinguish cancellation.
+ */
+export async function deliverPages(
+  pages: readonly string[],
+  signal: AbortSignal,
+  send: (page: string, index: number) => Promise<void>,
+): Promise<PageDelivery> {
+  let published = 0;
+  try {
+    for (const [index, page] of pages.entries()) {
+      signal.throwIfAborted();
+      await send(page, index);
+      published += 1;
+    }
+  } catch (error) {
+    signal.throwIfAborted();
+    return {published, total: pages.length, interrupted: true, error};
+  }
+  return {published, total: pages.length, interrupted: false};
+}
+
+export function interruptedNotice(delivery: PageDelivery): string {
+  return `⚠️ 已发送 ${delivery.published}/${delivery.total} 页，后续页发送中断，可重新执行查看`;
+}
 
 export interface Section {
   readonly heading?: string;
@@ -40,10 +86,10 @@ export function section(value: string | readonly Html[] | undefined, lines?: rea
   });
 }
 
-function plainBlocks(source: string): Block[] {
+function plainBlocks(source: string, reserve = 0): Block[] {
   const result: Block[] = [];
   let html = "";
-  const budget = MAX_HTML_LENGTH - "<pre></pre>".length;
+  const budget = Math.max(1, MAX_HTML_LENGTH - reserve - "<pre></pre>".length);
   // Iterate code points so an astral character can never be split in two.
   for (const character of source) {
     const escaped = escapeHtml(character);
@@ -57,7 +103,7 @@ function plainBlocks(source: string): Block[] {
   return result;
 }
 
-async function parserTools() {
+async function parserTools(reserve = 0) {
   const {parseDocument, DomUtils} = await import("htmlparser2");
   type HtmlNode = ReturnType<typeof parseDocument>["children"][number];
   const serialize = (node: HtmlNode): string => DomUtils.getOuterHTML(node, {encodeEntities: "utf8"});
@@ -87,16 +133,16 @@ async function parserTools() {
     }
     if (unsupported) return [
       {html: "此段包含不支持的格式，以下按文本显示。", entities: 0},
-      ...plainBlocks(source),
+      ...plainBlocks(source, reserve),
     ];
     const html = document.children.map(serialize).join("");
-    if (html.length <= MAX_HTML_LENGTH && entities <= MAX_ENTITIES) return [{html, entities}];
+    if (html.length <= MAX_HTML_LENGTH - reserve && entities <= MAX_ENTITIES) return [{html, entities}];
     let plain = DomUtils.textContent(document);
     const addresses = [...links];
     if (addresses.length) plain += `\n链接地址：\n${addresses.join("\n")}`;
     return [
       {html: "此段超出单条消息的长度或格式数量预算，以下以纯文本分段显示。", entities: 0},
-      ...plainBlocks(plain),
+      ...plainBlocks(plain, reserve),
     ];
   };
 
@@ -135,9 +181,9 @@ export async function richText(source: string): Promise<readonly Html[]> {
 }
 
 /** Preserve complete authored help while respecting Telegram message budgets. */
-export async function renderRichText(source: string): Promise<readonly string[]> {
-  const {description} = await parserTools();
-  return paginate(description(source));
+export async function renderRichText(source: string, reserve = 0): Promise<readonly string[]> {
+  const {description} = await parserTools(reserve);
+  return paginate(description(source), reserve);
 }
 
 function appendBlocks(target: Block[], source: string, normalize: (source: string) => Block[]): void {
@@ -146,13 +192,14 @@ function appendBlocks(target: Block[], source: string, normalize: (source: strin
   target.push(...normalize(source));
 }
 
-function paginate(blocks: readonly Block[]): string[] {
+function paginate(blocks: readonly Block[], reserve = 0): string[] {
   const result: string[] = [];
   let html = "";
   let entities = 0;
+  const limit = Math.max(1, MAX_HTML_LENGTH - reserve);
   for (const block of blocks) {
     if (!block.html.trim()) continue;
-    if (html && (html.length + 1 + block.html.length > MAX_HTML_LENGTH || entities + block.entities > MAX_ENTITIES)) {
+    if (html && (html.length + 1 + block.html.length > limit || entities + block.entities > MAX_ENTITIES)) {
       result.push(html);
       html = "";
       entities = 0;
@@ -164,8 +211,8 @@ function paginate(blocks: readonly Block[]): string[] {
   return result;
 }
 
-export async function renderDocument(options: DocumentOptions): Promise<readonly string[]> {
-  const tools = await parserTools();
+export async function renderDocument(options: DocumentOptions, reserve = 0): Promise<readonly string[]> {
+  const tools = await parserTools(reserve);
   const blocks: Block[] = [];
   appendBlocks(blocks, bold(options.title), tools.normalize);
   if (options.subtitle) appendBlocks(blocks, text(options.subtitle), tools.normalize);
@@ -179,5 +226,5 @@ export async function renderDocument(options: DocumentOptions): Promise<readonly
       appendBlocks(blocks, `${index ? "" : "\n"}${line}`, tools.normalize);
     }
   }
-  return paginate(blocks);
+  return paginate(blocks, reserve);
 }

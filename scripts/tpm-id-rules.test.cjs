@@ -5,10 +5,10 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const createTpm = require(path.join(root, 'dist/v2/builtins/tpm.js')).default;
 
-function harness(installed = [], pluginState = () => false) {
+function harness(installed = [], pluginState = () => false, plugins = []) {
   const calls = [], edits = [], activated = [], removed = [];
   let reply = {ids: ['git_PR', 'nezha']};
-  const host = {listPlugins: () => [], pluginState};
+  const host = {listPlugins: () => plugins, pluginState};
   const releases = {
     snapshot: () => ({generations: installed.map(id => ({id, state: 'active'}))}),
     remove: async id => {removed.push(id);},
@@ -55,11 +55,40 @@ test('tpm reports a missing plugin instead of inventing an uninstall', async () 
 });
 
 test('tpm refuses to replace a default module even with different casing', async () => {
-  const h = harness([], id => id === 'ai');
+  const h = harness([], id => id === 'ai', [{id: 'ai'}]);
   h.setReply({id: 'ai', revision: 'c'.repeat(64)});
   await h.run(['install', 'AI']);
+  assert.deepEqual(h.calls, [], 'default modules must not reach the repository');
   assert.deepEqual(h.activated, []);
   assert.match(h.edits.at(-1), /默认模块/);
+});
+
+test('tpm protects an exact default module before any repository access', async () => {
+  const h = harness([], id => id === 'help', [{id: 'help'}]);
+  h.setReply(new Error('V2 plugin not available'));
+  await h.run(['install', 'help']);
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.activated, []);
+  assert.match(h.edits.at(-1), /默认模块/);
+});
+
+test('tpm presents a repository ambiguity with declared ids', async () => {
+  const h = harness();
+  h.setReply({id: 'git_pr', error: 'AMBIGUOUS', ids: ['git_PR', 'GIT_pr']});
+  await h.run(['install', 'git_pr']);
+  assert.deepEqual(h.activated, []);
+  assert.match(h.edits.at(-1), /大小写冲突/);
+  assert.match(h.edits.at(-1), /git_PR/);
+  assert.match(h.edits.at(-1), /GIT_pr/);
+});
+
+test('tpm presents a structured not-found without an access-failure hint', async () => {
+  const h = harness();
+  h.setReply({id: 'missing', error: 'NOT_FOUND'});
+  await h.run(['install', 'missing']);
+  assert.deepEqual(h.activated, []);
+  assert.match(h.edits.at(-1), /不存在或不可用/);
+  assert.doesNotMatch(h.edits.at(-1), /检查仓库访问/);
 });
 
 test('tpm search matches declared ids case-insensitively and hides default modules', async () => {
@@ -77,4 +106,6 @@ test('tpm reports a case collision instead of guessing an installed target', asy
   await h.run(['remove', 'git_pr']);
   assert.deepEqual(h.removed, []);
   assert.match(h.edits.at(-1), /大小写冲突/);
+  assert.match(h.edits.at(-1), /git_PR/);
+  assert.match(h.edits.at(-1), /GIT_pr/);
 });
