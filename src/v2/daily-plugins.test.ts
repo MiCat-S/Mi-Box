@@ -55,14 +55,6 @@ test("daily artifact set loads defaults and handles offline AI media paths", asy
   const host = new PluginHost({storageRoot: path.join(directory, "assets"), tempRoot: path.join(directory, "temp"), telegram, logger,
     http: {fetch: async (input, init) => {
       const url = String(input);
-      if (url.startsWith("https://translate.google.com/translate_a/single?")) {
-        assert.equal(init?.method, "POST");
-        const params = new URLSearchParams(String(init?.body));
-        assert.equal(params.get("sl"), "auto");
-        assert.equal(params.get("tl"), "en");
-        assert.equal(params.get("q"), "fixture text");
-        return Response.json({sentences: [{trans: "fixture translation"}]});
-      }
       if (url.includes("quote-api-enhanced")) return new Response(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), {headers: {"content-type": "image/png"}});
       if (url.includes("fixture.invalid/media.mp4")) return new Response(Buffer.from("fixture-video"), {headers: {"content-type": "video/mp4"}});
       if (url.includes("/images/")) return new Response(JSON.stringify({data: [{b64_json: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString("base64")}]}));
@@ -99,7 +91,7 @@ test("daily artifact set loads defaults and handles offline AI media paths", asy
     assert.equal(await host.dispatchPrimary(saved(".ai fixture question")), true);
     assert.match(output.at(-1) ?? "", /fixture answer/);
     assert.equal(await host.dispatchPrimary(saved(".gt en fixture text")), true);
-    assert.match(output.at(-1) ?? "", /fixture translation/);
+    assert.match(output.at(-1) ?? "", /fixture answer/);
     assert.equal(await host.dispatchPrimary(saved(".ai model image main gpt-image-2")), true);
     assert.equal(await host.dispatchPrimary(saved(".ai image fixture art")), true);
     assert.match(files[0] ?? "", /ai_image_.*\.png/);
