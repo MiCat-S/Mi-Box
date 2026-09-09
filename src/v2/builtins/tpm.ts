@@ -119,7 +119,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
             name.toLowerCase().includes(query) && !["ai", "gt"].includes(name));
           const conflictGroups = (collisions ?? []).filter(group => Array.isArray(group) && group.length > 1);
           const hint = conflictGroups.length
-            ? `仓库结果仅包含允许安装的 V2 扩展；大小写冲突组已阻止批量构建：${conflictGroups.map(group => group.join(" / ")).join("；")}`
+            ? `仓库结果仅包含允许安装的 V2 扩展；仓库存在大小写冲突组：${conflictGroups.map(group => group.join(" / ")).join("；")}（批量构建会跳过整组，精确单项仍可安装）`
             : "仓库结果仅包含允许安装的 V2 扩展";
           const output = await listView(matches, "可安装扩展", invocation.prefix, hint, query);
           for (const [index, page] of output.entries()) {
@@ -180,6 +180,18 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
               detail: `成功 ${installedIds.length} · 失败 ${failed.length}`,
             }), htmlOptions);
           }
+          // Only groups actually blocked in this batch are reported as blocked;
+          // repository collisions that did not block anything stay a warning.
+          const groupKey = (group: readonly string[]): string => group.join("\u0000");
+          const blockedGroups = [...new Map((result.candidates ?? [])
+            .filter(item => item.error === "AMBIGUOUS" && Array.isArray(item.ids) && item.ids.length > 1)
+            .map(item => [groupKey(item.ids!), item.ids!])).values()];
+          const repoGroups = (result.collisions ?? []).filter(group => Array.isArray(group) && group.length > 1);
+          const collisionNotice = blockedGroups.length
+            ? `本次已阻止大小写冲突组：${blockedGroups.map(group => group.join(" / ")).join("；")}`
+            : repoGroups.length
+              ? `仓库存在大小写冲突组：${repoGroups.map(group => group.join(" / ")).join("；")}（精确单项仍可安装）`
+              : undefined;
           const output = await renderDocument({
             title: `${getBotName()} 插件批量${verb}完成`,
             subtitle: `成功 ${installedIds.length} · 跳过 ${skipped.size} · 失败 ${failed.length}`,
@@ -189,9 +201,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
               ...(skipped.size ? [section(`已安装或默认模块 · ${skipped.size}`, await compactList([...skipped]))] : []),
             ],
             footer: [...(removing ? [text("插件配置数据已保留")] : []),
-              ...((result.collisions ?? []).filter(group => Array.isArray(group) && group.length > 1).length
-                ? [text(`大小写冲突组已阻止批量构建：${(result.collisions ?? []).filter(group => Array.isArray(group) && group.length > 1).map(group => group.join(" / ")).join("；")}`)]
-                : []),
+              ...(collisionNotice ? [text(collisionNotice)] : []),
               concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
           }, PAGE_LABEL_RESERVE);
           for (const [index, page] of output.entries()) {

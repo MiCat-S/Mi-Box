@@ -101,13 +101,15 @@ test('tpm search matches declared ids case-insensitively and hides default modul
   assert.doesNotMatch(output, /· ai/);
 });
 
-test('tpm search and batch results surface case-fold collision groups', async () => {
+test('tpm search and batch results surface case-fold collision groups accurately', async () => {
   const search = harness();
   search.setReply({ids: ['git_PR', 'GIT_pr', 'nezha'], collisions: [['GIT_pr', 'git_PR']]});
   await search.run(['search', 'git']);
   const searchOutput = search.edits.join('\n');
-  assert.match(searchOutput, /大小写冲突组已阻止批量构建/);
+  assert.match(searchOutput, /仓库存在大小写冲突组/);
+  assert.match(searchOutput, /精确单项仍可安装/);
   assert.match(searchOutput, /GIT_pr \/ git_PR/);
+  assert.doesNotMatch(searchOutput, /本次已阻止/);
 
   const batch = harness();
   batch.setReply({ids: ['git_PR', 'GIT_pr'], collisions: [['GIT_pr', 'git_PR']], candidates: [
@@ -116,9 +118,21 @@ test('tpm search and batch results surface case-fold collision groups', async ()
   ]});
   await batch.run(['install', 'all']);
   const batchOutput = batch.edits.join('\n');
-  assert.match(batchOutput, /大小写冲突组已阻止批量构建/);
+  assert.match(batchOutput, /本次已阻止大小写冲突组/);
   assert.match(batchOutput, /GIT_pr \/ git_PR/);
   assert.deepEqual(batch.activated, []);
+});
+
+test('tpm reports a repository collision warning when a single exact member still updates', async () => {
+  const h = harness(['git_PR']);
+  h.setReply({ids: ['GIT_pr', 'git_PR'], collisions: [['GIT_pr', 'git_PR']],
+    candidates: [{id: 'git_PR', revision: 'a'.repeat(64)}]});
+  await h.run(['update', 'all']);
+  assert.deepEqual(h.activated, [{id: 'git_PR', revision: 'a'.repeat(64)}]);
+  const output = h.edits.join('\n');
+  assert.match(output, /仓库存在大小写冲突组/);
+  assert.match(output, /精确单项仍可安装/);
+  assert.doesNotMatch(output, /本次已阻止/);
 });
 
 test('tpm reports a case collision instead of guessing an installed target', async () => {
