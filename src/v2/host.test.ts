@@ -544,3 +544,43 @@ test("plugin helper declarations exceeding host limits fail before setup", async
   assert.equal(setup, false);
   assert.equal(host.pluginState("ping"), undefined);
 });
+
+test("new command messages in one chat run independently while edits of one message stay ordered", async t => {
+  const {host} = await fixture(t, {concurrency: 2});
+  const started = deferred(), release = deferred();
+  const events: string[] = [];
+  await host.load(definePlugin({apiVersion: 1, id: "work", description: "work", commands: {
+    work: {description: "long work", ignoreEdited: false, async handle({message}) {
+      if (message.edited) {events.push("edited"); return;}
+      events.push("started"); started.resolve(); await release.promise; events.push("finished");
+    }},
+    stop: {description: "control", handle() {events.push("stop");}},
+  }}));
+  const running = host.dispatchPrimary({...envelope, text: ".work"});
+  await started.promise;
+  const edited = host.dispatchPrimary({...envelope, text: ".work", edited: true});
+  const next = host.dispatchPrimary({...envelope, id: 2, text: ".stop"});
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(events, ["started", "stop"]);
+    assert.equal(host.snapshot().queue.queued, 1);
+  } finally {release.resolve(); await Promise.all([running, edited, next]);}
+  assert.deepEqual(events, ["started", "stop", "finished", "edited"]);
+});
+
+test("independent command messages retain the configured concurrency bound", async t => {
+  const {host} = await fixture(t, {concurrency: 2});
+  const gates = [deferred(), deferred(), deferred()];
+  const entered: number[] = [];
+  await host.load(plugin(async ({message}) => {entered.push(message.id); await gates[message.id - 1].promise;}));
+  const work = [1, 2, 3].map(id => host.dispatchPrimary({...envelope, id}));
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(entered, [1, 2]);
+    assert.deepEqual(host.snapshot().queue, {active: 2, queued: 1, closed: false});
+    gates[0].resolve(); await work[0];
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(entered, [1, 2, 3]);
+    assert.equal(host.snapshot().queue.active, 2);
+  } finally {gates.forEach(gate => gate.resolve()); await Promise.all(work);}
+});

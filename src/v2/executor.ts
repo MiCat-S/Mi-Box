@@ -25,7 +25,7 @@ interface Job {
 }
 
 // Pending callbacks are bounded; active work retains its slot until it settles,
-// including after cancellation. Keys prevent concurrent work in one dialogue.
+// including after cancellation. Tasks sharing a key run serially.
 export class KeyedExecutor {
   private readonly controller = new AbortController();
   private readonly queue: Job[] = [];

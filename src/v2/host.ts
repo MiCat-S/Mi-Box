@@ -350,7 +350,7 @@ export class PluginHost {
     if (message.edited && (command.ignoreEdited ?? true)) return Promise.resolve(false);
     const snapshot = Object.freeze({...message, text: parsed.text});
     const plugin = target.plugin;
-    return plugin.scope.run(`command:${target.name}`, () => this.executor.submit(message.chatId, async () => {
+    return plugin.scope.run(`command:${target.name}`, () => this.executor.submit(`command:${message.chatId}:${message.id}`, async () => {
       plugin.scope.signal.throwIfAborted();
       const explicitHelp = parsed.args.length === 1 && ["--help", ...(command.helpArgs ?? [])].includes(parsed.args[0].toLowerCase());
       if (plugin.definition.renderHelp && (explicitHelp || (!parsed.args.length && command.helpOnEmpty))) {
