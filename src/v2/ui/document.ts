@@ -53,6 +53,20 @@ export function interruptedNotice(delivery: PageDelivery): string {
   return `⚠️ 已发送 ${delivery.published}/${delivery.total} 页，后续页发送中断，可重新执行查看`;
 }
 
+/**
+ * Reduce a delivery failure to a stable category for logging. Never returns a
+ * message, URL, credential or arbitrary text: only a short code or class name.
+ */
+export function deliveryErrorCategory(error: unknown): string {
+  if (error && typeof error === "object") {
+    const code = (error as {code?: unknown}).code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,31}$/.test(code)) return code;
+    const name = (error as {name?: unknown}).name;
+    if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(name)) return name;
+  }
+  return "UNKNOWN";
+}
+
 export interface Section {
   readonly heading?: string;
   readonly lines: readonly Html[];

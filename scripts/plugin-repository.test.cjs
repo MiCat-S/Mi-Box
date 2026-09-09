@@ -105,7 +105,33 @@ test('case collisions are reported with declared ids and exact matches still bui
   assert.deepEqual(f.run('build', 'git_pr'), {id: 'git_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']});
   assert.deepEqual(f.built, []);
   assert.deepEqual(f.run('build', 'git_PR'), {id: 'git_PR', revision: 'a'.repeat(64)});
-  assert.deepEqual(f.run('build-selected', 'git_pr', 'GIT_pr'), {ids: ['GIT_pr', 'ai', 'bad', 'dig', 'git_PR', 'weather'], collisions: [['GIT_pr', 'git_PR']],
-    candidates: [{id: 'GIT_pr', revision: 'a'.repeat(64)}, {id: 'git_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']}]});
+  assert.deepEqual(f.built, ['git_PR']);
+  assert.equal(f.cleaned(), true);
+});
+
+test('batch builds isolate case-fold collision groups instead of sharing a checkout', t => {
+  const f = fixture(t, new Set(), 'git_PR/v2.ts\nGIT_pr/v2.ts\n');
+  const result = f.run('build-all');
+  assert.deepEqual(result.candidates.filter(item => item.error === 'AMBIGUOUS'), [
+    {id: 'GIT_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']},
+    {id: 'git_PR', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']},
+  ]);
+  assert.deepEqual(result.candidates.filter(item => item.revision).map(item => item.id).sort(), ['ai', 'bad', 'dig', 'weather']);
+  const sparse = f.gitCalls.find(args => args[0] === 'sparse-checkout');
+  assert.ok(sparse.every(value => !value.includes('GIT_pr') && !value.includes('git_PR')), 'collision paths must not be checked out');
+  assert.equal(f.cleaned(), true);
+});
+
+test('selected batch builds a single exact collision member but blocks two spellings together', t => {
+  const f = fixture(t, new Set(), 'git_PR/v2.ts\nGIT_pr/v2.ts\n');
+  assert.deepEqual(f.run('build-selected', 'git_PR'), {ids: ['GIT_pr', 'ai', 'bad', 'dig', 'git_PR', 'weather'],
+    collisions: [['GIT_pr', 'git_PR']], candidates: [{id: 'git_PR', revision: 'a'.repeat(64)}]});
+  assert.deepEqual(f.built, ['git_PR']);
+  assert.deepEqual(f.run('build-selected', 'git_PR', 'GIT_pr'), {ids: ['GIT_pr', 'ai', 'bad', 'dig', 'git_PR', 'weather'],
+    collisions: [['GIT_pr', 'git_PR']], candidates: [
+      {id: 'git_PR', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']},
+      {id: 'GIT_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']},
+    ]});
+  assert.deepEqual(f.built, ['git_PR']);
   assert.equal(f.cleaned(), true);
 });

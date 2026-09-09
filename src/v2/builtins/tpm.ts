@@ -113,12 +113,15 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       try {
         if (sub === "search" || sub === "s") {
           await ctx.telegram.edit(invocation.message, renderFeedback({state: "working", title: "正在读取 V2 插件仓库…"}), htmlOptions);
-          const {ids} = await repository(ctx, "search");
+          const {ids, collisions} = await repository(ctx, "search");
           const query = invocation.args.slice(1).join(" ").trim().toLowerCase();
           const matches = (ids ?? []).filter(name => isPluginId(name) &&
             name.toLowerCase().includes(query) && !["ai", "gt"].includes(name));
-          const output = await listView(matches, "可安装扩展", invocation.prefix,
-            "仓库结果仅包含允许安装的 V2 扩展", query);
+          const conflictGroups = (collisions ?? []).filter(group => Array.isArray(group) && group.length > 1);
+          const hint = conflictGroups.length
+            ? `仓库结果仅包含允许安装的 V2 扩展；大小写冲突组已阻止批量构建：${conflictGroups.map(group => group.join(" / ")).join("；")}`
+            : "仓库结果仅包含允许安装的 V2 扩展";
+          const output = await listView(matches, "可安装扩展", invocation.prefix, hint, query);
           for (const [index, page] of output.entries()) {
             ctx.signal.throwIfAborted();
             if (!index) await ctx.telegram.edit(invocation.message, page, htmlOptions);
@@ -186,6 +189,9 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
               ...(skipped.size ? [section(`已安装或默认模块 · ${skipped.size}`, await compactList([...skipped]))] : []),
             ],
             footer: [...(removing ? [text("插件配置数据已保留")] : []),
+              ...((result.collisions ?? []).filter(group => Array.isArray(group) && group.length > 1).length
+                ? [text(`大小写冲突组已阻止批量构建：${(result.collisions ?? []).filter(group => Array.isArray(group) && group.length > 1).map(group => group.join(" / ")).join("；")}`)]
+                : []),
               concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
           }, PAGE_LABEL_RESERVE);
           for (const [index, page] of output.entries()) {

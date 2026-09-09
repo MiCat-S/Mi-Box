@@ -3,7 +3,7 @@ import test from "node:test";
 import {Parser} from "htmlparser2";
 import {HTMLParser} from "teleproto/extensions/html.js";
 import {bold, code, command, concat, field, text} from "./text";
-import {deliverPages, MAX_ENTITIES, MAX_HTML_LENGTH, PAGE_LABEL_RESERVE, pageLabel, renderDocument, richText, section} from "./document";
+import {deliverPages, deliveryErrorCategory, MAX_ENTITIES, MAX_HTML_LENGTH, PAGE_LABEL_RESERVE, pageLabel, renderDocument, richText, section} from "./document";
 import {renderFeedback} from "./feedback";
 
 test("safe text builders escape all Telegram HTML metacharacters", () => {
@@ -102,4 +102,18 @@ test("page delivery rethrows cancellation instead of reporting an interruption",
     if (index === 1) {controller.abort(new Error("stop")); throw controller.signal.reason;}
   });
   await assert.rejects(pending, /stop/);
+});
+
+test("page delivery reports a first-page failure with no published page", async () => {
+  const failure = new Error("first page failed");
+  const delivery = await deliverPages(["一", "二"], new AbortController().signal, async () => {throw failure;});
+  assert.deepEqual(delivery, {published: 0, total: 2, interrupted: true, error: failure});
+});
+
+test("delivery error categories are stable and never leak messages", () => {
+  assert.equal(deliveryErrorCategory(Object.assign(new Error("secret https://x/?token=1"), {code: "TIMED_OUT"})), "TIMED_OUT");
+  assert.equal(deliveryErrorCategory(new RangeError("private")), "RangeError");
+  assert.equal(deliveryErrorCategory(new Error("raw text only")), "Error");
+  assert.equal(deliveryErrorCategory("string failure"), "UNKNOWN");
+  assert.equal(deliveryErrorCategory(Object.assign(new Error("x"), {code: "not a code"})), "Error");
 });

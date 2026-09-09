@@ -56,13 +56,28 @@ function run(action, ...targets) {
       const {manifest} = buildPlugin({id, packageRoot: path.join(repository, id), entry: 'v2.ts'});
       return {id, revision: manifest.revision};
     }
+    const groupOf = new Map();
+    for (const group of collisions) for (const id of group) groupOf.set(id, group);
     const excluded = new Set(action === 'build-all' ? targets : []);
     const requested = action === 'build-selected' ? targets.map(value => ({raw: value, ...resolve(value)})) : [];
-    const selected = action === 'build-all' ? ids.filter(value => !excluded.has(value))
-      : [...new Set(requested.map(item => item.id).filter(Boolean))];
+    const requestedIds = new Set(requested.map(item => item.id).filter(Boolean));
+    // A case-fold collision group is only safe to build when exactly one member
+    // is requested. Batch/all requests must not check out both spellings into
+    // the same case-insensitive directory.
+    const blocked = new Set();
+    for (const group of collisions) {
+      const members = group.filter(id => action === 'build-all' ? !excluded.has(id) : requestedIds.has(id));
+      if (members.length > 1) for (const id of members) blocked.add(id);
+    }
+    const selected = (action === 'build-all' ? ids.filter(value => !excluded.has(value)) : [...requestedIds])
+      .filter(id => !blocked.has(id));
     const missing = action === 'build-selected'
       ? requested.filter(item => item.error).map(item => ({id: item.raw, error: item.error, ...(item.ids ? {ids: item.ids} : {})})) : [];
-    if (!selected.length) return {ids, collisions, candidates: missing};
+    const conflicts = action === 'build-all'
+      ? [...blocked].map(id => ({id, error: 'AMBIGUOUS', ids: groupOf.get(id)}))
+      : requested.filter(item => item.id && blocked.has(item.id))
+        .map(item => ({id: item.raw, error: 'AMBIGUOUS', ids: groupOf.get(item.id)}));
+    if (!selected.length) return {ids, collisions, candidates: [...conflicts, ...missing]};
     git(['sparse-checkout', 'set', '--no-cone', ...selected.flatMap(value => [`/${value}/v2.ts`, `/${value}/v2/`])], repository);
     git(['checkout', 'HEAD'], repository);
     const candidates = selected.map(id => {
@@ -71,7 +86,7 @@ function run(action, ...targets) {
         return {id, revision: manifest.revision};
       } catch { return {id, error: 'BUILD'}; }
     });
-    return {ids, collisions, candidates: [...candidates, ...missing]};
+    return {ids, collisions, candidates: [...candidates, ...conflicts, ...missing]};
   } finally {fs.rmSync(stage, {recursive: true, force: true});}
 }
 if (require.main === module) {

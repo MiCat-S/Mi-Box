@@ -101,6 +101,26 @@ test('tpm search matches declared ids case-insensitively and hides default modul
   assert.doesNotMatch(output, /· ai/);
 });
 
+test('tpm search and batch results surface case-fold collision groups', async () => {
+  const search = harness();
+  search.setReply({ids: ['git_PR', 'GIT_pr', 'nezha'], collisions: [['GIT_pr', 'git_PR']]});
+  await search.run(['search', 'git']);
+  const searchOutput = search.edits.join('\n');
+  assert.match(searchOutput, /大小写冲突组已阻止批量构建/);
+  assert.match(searchOutput, /GIT_pr \/ git_PR/);
+
+  const batch = harness();
+  batch.setReply({ids: ['git_PR', 'GIT_pr'], collisions: [['GIT_pr', 'git_PR']], candidates: [
+    {id: 'GIT_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']},
+    {id: 'git_PR', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']},
+  ]});
+  await batch.run(['install', 'all']);
+  const batchOutput = batch.edits.join('\n');
+  assert.match(batchOutput, /大小写冲突组已阻止批量构建/);
+  assert.match(batchOutput, /GIT_pr \/ git_PR/);
+  assert.deepEqual(batch.activated, []);
+});
+
 test('tpm reports a case collision instead of guessing an installed target', async () => {
   const h = harness(['git_PR', 'GIT_pr']);
   await h.run(['remove', 'git_pr']);
