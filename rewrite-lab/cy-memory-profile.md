@@ -30,7 +30,7 @@ node scripts/cy-memory-profile-v2.cjs --plugins ../TeleBox-Plugins --order child
 
 `--plugins` 指向包含 `cy/v2/wordcloud.ts` 的插件源码仓库。输出路径必须是尚不存在的文件。脚本使用合成输入，不调用 Telegram 或 HTTP；只在 Core 的 `temp` 下建立实验文件，结束后清理。
 
-JSON 记录 Node、Canvas、系统、可用中文字体路径、绘图源码哈希、PNG 哈希、每轮耗时和内存。Linux 额外读取 `/proc/<pid>/smaps_rollup` 计算进程树 PSS；无权限或进程在读取期间退出时，该次 PSS 为 `null`。运行脚本不需要提升权限。
+JSON 记录 Node、Canvas、系统、可用中文字体路径、绘图源码哈希、PNG 哈希、每轮耗时和内存，以及子进程环境策略（`childEnvStrategy`）。当前实现为 `"inherited"`，子进程继承完整父环境；如部署采用其他环境变量策略，应使用该策略重新测量。Linux 额外读取 `/proc/<pid>/smaps_rollup` 计算进程树 PSS；无权限或进程在读取期间退出时，该次 PSS 为 `null`。运行脚本不需要提升权限。
 
 比较目标包括：
 
@@ -45,5 +45,6 @@ JSON 记录 Node、Canvas、系统、可用中文字体路径、绘图源码哈�
 - RSS 加总会重复计算共享内存页；Linux PSS 将共享页按比例分摊。
 - 20 ms 定时采样可能错过短时峰值，报告中的峰值是已观测值的下界。报告还列出实际最大采样间隔。
 - 子进程自身的 `maxRSSKiB` 是它整个生命周期的高水位，不能与另一个时刻的父进程峰值直接相加作为同时峰值。
+- 子进程继承父进程完整环境变量。如果生产部署限制子进程环境（剥离 PATH、无 HOME 等），可能影响 Canvas 字体查找和原生内存行为，需要在对应环境下复测。
 - 本机未安装代码中列出的 Linux 中文字体，使用了系统字体回退；本机像素一致不代替 Linux 字体环境验证。
 - 实验只覆盖词云选词与绘图，不包含真实消息拉取、上传、其他插件负载或完整服务基线。

@@ -57,9 +57,9 @@ async function render() {
 function resume(signal) {
   return new Promise((resolve, reject) => {
     const cleanup = () => {process.off('message', onMessage); signal.removeEventListener('abort', onAbort);};
-    const onMessage = () => {cleanup(); resolve();};
+    const onMessage = message => {if (message !== 'go') return; cleanup(); resolve();};
     const onAbort = () => {cleanup(); reject(new Error('Profile cancelled'));};
-    process.once('message', onMessage); signal.addEventListener('abort', onAbort, {once: true});
+    process.on('message', onMessage); signal.addEventListener('abort', onAbort, {once: true});
     if (signal.aborted) onAbort();
   });
 }
@@ -97,7 +97,7 @@ async function worker() {
         await fs.writeFile(output, cloud.renderWordCloud(items, 500, 240), {flag: 'wx', mode: 0o600});
       } else {
         const result = await processes.run(process.execPath, [__filename, '--render', artifact, input, output],
-          {env: process.env, maxOutputBytes: 65536});
+          {env: process.env, maxOutputBytes: 65536}); // inherited: full parent environment
         childMemory = JSON.parse(result.stdout.toString()).memory;
       }
       const elapsedMs = performance.now() - start;
@@ -110,13 +110,17 @@ async function worker() {
       process.send({phase: 'idle', index: i});
       await next;
     }
+    const canvasLoadedInParent = Object.keys(require.cache).some(file => /[\\/]node_modules[\\/]canvas[\\/]/.test(file));
+    const drainReport = await scope.drain();
+    assert.equal(drainReport.completed, true);
     const runner = processes.snapshot();
     assert.equal(runner.active, 0);
     assert.equal(runner.queued, 0);
-    const canvasLoadedInParent = Object.keys(require.cache).some(file => /[\\/]node_modules[\\/]canvas[\\/]/.test(file));
     process.send({phase: 'done', result: {mode, words: items.length, before, runs, canvasLoadedInParent, runner}});
+  } catch (error) {
+    await scope.drain();
+    throw error;
   } finally {
-    assert.equal((await scope.drain()).completed, true);
     process.off('SIGTERM', stop); process.off('SIGINT', stop);
     process.disconnect();
   }
@@ -196,8 +200,9 @@ async function main() {
       '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc'].filter(file => syncFs.existsSync(file));
     const report = {node: process.version, platform: process.platform, architecture: process.arch, release: os.release(),
       canvas: require('canvas/package.json').version, sourceSHA256: digest(await fs.readFile(source)), fonts,
-      runs, order, sampleIntervalMs: interval, pngEquivalent: true,
+      runs, order, sampleIntervalMs: interval, pngEquivalent: true, childEnvStrategy: 'inherited',
       notes: ['Synthetic input; no Telegram or HTTP requests.', 'Inline and child render the same compiled code and use the same environment.',
+        'Child processes inherit the full parent environment; repeat the measurement with the deployment environment policy if it differs.',
         'RSS sums count shared pages more than once; Linux PSS apportions shared pages.',
         'Sampled peaks are lower bounds. Child maxRSS is reported separately and is not a simultaneous process-tree peak.',
         'Idle samples follow explicit JavaScript GC. Font availability and other plugins affect production results.'], results};
