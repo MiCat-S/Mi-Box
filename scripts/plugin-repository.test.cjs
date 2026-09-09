@@ -91,6 +91,14 @@ test('declared ids may contain upper case and resolve case-insensitively', t => 
   assert.equal(f.cleaned(), true);
 });
 
+test('repository, builder and SDK share one declared id pattern', () => {
+  const read = file => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const pattern = '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$';
+  for (const file of ['scripts/plugin-repository.cjs', 'scripts/build-v2-plugin.cjs', 'src/v2/plugin-id.ts']) {
+    assert.ok(read(file).includes(pattern), `${file} must use the shared id pattern`);
+  }
+});
+
 test('case collisions are reported with declared ids and exact matches still build', t => {
   const f = fixture(t, new Set(), 'git_PR/v2.ts\nGIT_pr/v2.ts\n');
   assert.deepEqual(f.run('search').collisions, [['GIT_pr', 'git_PR']]);
