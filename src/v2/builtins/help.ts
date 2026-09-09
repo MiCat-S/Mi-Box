@@ -2,7 +2,7 @@ import {isOwnerOrGroupSendAs} from "../permissions";
 import {getBotName, setBotName} from "../branding";
 import type {PluginHost} from "../host";
 import {definePlugin, type CommandInvocation, type PluginContext, type PluginDefinition} from "../sdk";
-import {bold, code, command, concat, link, text, type Html} from "../ui/text";
+import {code, command, concat, link, text, type Html} from "../ui/text";
 import {renderDocument, richText, section, type DocumentOptions, type Section} from "../ui/document";
 
 type HelpHost = Pick<PluginHost, "listCommands" | "listPlugins" | "configuration">;
@@ -72,8 +72,8 @@ export async function buildOverview(input: OverviewInput): Promise<DocumentOptio
   const prefix = configuration.prefixes[0] ?? ".";
   const aliases = configuration.aliases;
   const groups: ReadonlyArray<[string, ReadonlySet<string>]> = [
-    ["常用命令", new Set(["agent", "ai", "gt", "memory", "ping", "status", "sysinfo", "tpm", "update"])],
-    ["系统工具", new Set(["alias", "autofix", "bf", "env", "exec", "help", "loglevel", "prefix", "privacy", "restart", "sudo", "version"])],
+    ["⚡ 常用命令", new Set(["agent", "ai", "gt", "memory", "ping", "status", "sysinfo", "tpm", "update"])],
+    ["🔧 系统工具", new Set(["alias", "autofix", "bf", "env", "exec", "help", "loglevel", "prefix", "privacy", "restart", "sudo", "version"])],
   ];
   const listed = new Set<string>();
   const sections: Section[] = [];
@@ -123,24 +123,24 @@ export async function buildOverview(input: OverviewInput): Promise<DocumentOptio
     .map(entry => entry.name)
     .sort((left, right) => left.localeCompare(right));
   const extensionLines = addCommands(ungrouped);
-  if (extensionLines.length) sections.push(section("扩展插件", extensionLines));
+  if (extensionLines.length) sections.push(section("🧩 扩展插件", extensionLines));
   if (!listed.size && !ungrouped.length) sections.push(section([text("暂无可用命令")]));
   const jobs = plugins.filter(plugin => !plugin.commands.length).map(plugin => code(plugin.id));
-  if (jobs.length) sections.push(section("定时模块", jobs));
+  if (jobs.length) sections.push(section("⏰ 定时模块", jobs));
 
   const footer: Html[] = [
-    concat(text("发送 "), command(prefix, "help", "<命令>"), text(" 查看详细说明")),
+    concat(text("💬 使用 "), command(prefix, "help", "<命令>"), text(" 查看命令详情")),
   ];
   if (commands.some(entry => entry.name === "tpm")) {
-    footer.push(concat(command(prefix, "tpm", "search"), text(" 显示远程插件列表")));
+    footer.push(concat(text("📦 "), command(prefix, "tpm", "search"), text(" 浏览插件市场")));
   }
   footer.push(concat(
-    link("https://github.com/MiCat-S/Mi-Box", `${getBotName()} 仓库`), text(" | "),
-    link("https://github.com/MiCat-S/Mi-Box-Plugins", "插件仓库"),
+    link("https://github.com/MiCat-S/Mi-Box", "仓库"), text(" · "),
+    link("https://github.com/MiCat-S/Mi-Box-Plugins", "插件"),
   ));
   return {
-    title: `${getBotName()} 控制台`,
-    subtitle: `${commands.length} 个命令 · ${plugins.length} 个模块\n前缀 ${configuration.prefixes.map(value => value).join(" · ")}`,
+    title: `📋 ${getBotName()} 帮助中心`,
+    subtitle: `${commands.length} 个命令 · ${plugins.length} 个模块 · 前缀 ${configuration.prefixes.join(" · ")}`,
     sections,
     footer,
   };
@@ -160,23 +160,23 @@ export async function buildPluginDetails(
   if (!commandLines.length) commandLines.push(text("无可调用命令"));
 
   const sections: Section[] = [
-    section("功能说明", await richText(plugin.renderHelp?.(prefix) ?? (plugin.description || "暂无描述信息"))),
-    section("可用命令", commandLines),
+    section("📖 功能说明", await richText(plugin.renderHelp?.(prefix) ?? (plugin.description || "暂无描述信息"))),
+    section("⚙️ 可用命令", commandLines),
   ];
-  if (usage) sections.push(section(undefined, [concat(bold("使用方法："), code(` ${prefix}${usage} [参数]`))]));
+  if (usage) sections.push(section(undefined, [concat(text("💡 用法："), code(`${prefix}${usage} [参数]`))]));
   if (plugin.jobs.length) {
     const jobs: Html[] = [];
     for (const job of plugin.jobs) {
       jobs.push(concat(code(job.name), text(" "), code(`(${job.cron})`)));
       jobs.push(...await richText(job.description || "暂无描述信息"));
     }
-    sections.push(section("定时任务", jobs));
+    sections.push(section("⏰ 定时任务", jobs));
   }
   return {
-    title: `${pluginIcons[plugin.id.toLowerCase()] ?? "🧩"} ${plugin.id} 帮助`,
-    subtitle: `${plugin.commands.length} 个命令`,
+    title: `${pluginIcons[plugin.id.toLowerCase()] ?? "🧩"} ${plugin.id}`,
+    subtitle: plugin.commands.length ? `${plugin.commands.length} 个命令` : "定时模块",
     sections,
-    footer: await richText(`使用 ${code(`${prefix}help`)} 查看所有命令`),
+    footer: [concat(text("💬 "), command(prefix, "help"), text(" 返回帮助中心"))],
   };
 }
 
@@ -217,8 +217,8 @@ export function createHelp(host: HelpHost, ownerId?: string): PluginDefinition {
         const target = resolve(query, [...plugins], configuration.prefixes, configuration.aliases);
         if (!target) {
           output = await renderDocument({
-            title: `${getBotName()} 帮助`,
-            sections: [section(undefined, [text(`未找到命令或模块 ${query}`), concat(text("使用 "), command(invocation.prefix, "help"), text(" 查看所有命令"))])],
+            title: `❌ 未找到`,
+            sections: [section(undefined, [text(`未找到命令或模块：${query}`), concat(text("💬 "), command(invocation.prefix, "help"), text(" 查看所有可用命令"))])],
           });
         } else {
           output = await renderDocument(await buildPluginDetails(

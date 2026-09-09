@@ -104,7 +104,7 @@ test("host exposes dynamic plugin help using the invoking secondary prefix", asy
   assert.equal(await host.dispatchPrimary({id: 1, chatId: "1", outgoing: true, text: "!help example"}), true);
   const content = output.map(value => HTMLParser.parse(value)[0]).join("\n");
   assert.match(content, /!example BTC/);
-  assert.match(content, /!help/);
+  assert.match(content, /💬 .*!help/);
   assert.doesNotMatch(content, /\.example|\.help/);
 });
 
@@ -156,12 +156,14 @@ test("main help shows single commands, grouped modules, dynamic prefixes and rep
   const f = fixture(t, [plugin("ping"), plugin("tools", ["one", "two"]), plugin("help", ["help", "h"])]);
   const messages = await f.run();
   const text = visible(messages);
-  assert.match(text, /MiBot 控制台/);
+  assert.match(text, /帮助中心/);
   assert.match(text, /5 个命令/);
-  assert.match(text, /常用命令\n\.ping/);
-  assert.match(text, /系统工具\n\.h  \.help/);
-  assert.match(text, /扩展插件\n\.one  \.two/);
-  assert.match(text, /发送 \.help <命令> 查看详细说明/);
+  assert.match(text, /⚡ 常用命令\n\.ping/);
+  assert.match(text, /🔧 系统工具\n\.h  \.help/);
+  assert.match(text, /🧩 扩展插件\n\.one  \.two/);
+  assert.match(text, /💬 使用 \.help <命令> 查看命令详情/);
+  assert.match(messages[0].text, /前缀 \./);
+  assert.equal(messages[0].text.includes("&lt;code&gt;"), false);
   assert.equal(text.includes(".tpm search"), false);
   assert.ok(messages.some((entry) => entry.text.includes('href="https://github.com/MiCat-S/Mi-Box"')));
   assert.ok(messages.some((entry) => entry.text.includes('href="https://github.com/MiCat-S/Mi-Box-Plugins"')));
@@ -172,8 +174,8 @@ test("main help shows single commands, grouped modules, dynamic prefixes and rep
 test("privacy command is listed with system tools", async (t) => {
   const f = fixture(t, [plugin("privacy")]);
   const text = visible(await f.run());
-  assert.match(text, /系统工具[\s\S]*\.privacy/);
-  assert.doesNotMatch(text, /扩展插件/);
+  assert.match(text, /🔧 系统工具[\s\S]*\.privacy/);
+  assert.doesNotMatch(text, /🧩 扩展插件/);
 });
 
 test("production-sized rich-text catalog fits one compact message", async (t) => {
@@ -185,9 +187,9 @@ test("production-sized rich-text catalog fits one compact message", async (t) =>
   const text = visible(messages);
   assert.equal(messages.length, 1, "the complete catalog edits only the invoking message");
   assert.match(text, /34 个命令/);
-  assert.ok(text.split("\n").length <= 23, text);
-  assert.ok(text.length < 650, text);
-  assert.ok(messages[0].text.includes("<b>常用命令</b>"));
+  assert.ok(text.split("\n").length <= 26, text);
+  assert.ok(text.length < 750, text);
+  assert.ok(messages[0].text.includes("<b>⚡ 常用命令</b>"));
   assert.ok(messages[0].text.includes("<code>.agent</code>  <code>.ai</code>"));
   const listed = [...messages[0].text.matchAll(/<code>(\.[a-z]+)<\/code>/g)].map((match) => match[1]);
   assert.deepEqual(listed.sort(), entries.flatMap((entry) => entry.commands.map((command) => "." + command.name)).sort());
@@ -208,12 +210,13 @@ test("empty command catalogs and job-only modules have usable main and detail he
   const jobs = plugin("timer", [], "定时模块说明");
   jobs.jobs = [{ name: "daily", cron: "0 0 * * *", description: "每天运行" }];
   f.setPlugins([jobs]);
-  assert.match(visible(await f.run()), /定时模块\ntimer/);
+  assert.match(visible(await f.run()), /⏰ 定时模块\ntimer/);
   const detail = visible(await f.run(["timer"]));
   assert.match(detail, /定时模块说明/);
-  assert.match(detail, /定时任务\ndaily \(0 0 \* \* \*\)\n每天运行/);
+  assert.match(detail, /⏰ 定时任务\ndaily \(0 0 \* \* \*\)\n每天运行/);
   assert.equal(detail.includes(".undefined"), false);
   assert.equal(detail.includes("使用方法"), false);
+  assert.equal(detail.includes("💡 用法"), false);
 });
 
 test("prefixes and alias names are escaped and multi-byte prefixes resolve details", async (t) => {
@@ -226,31 +229,39 @@ test("prefixes and alias names are escaped and multi-byte prefixes resolve detai
   assert.ok(text.includes("命令🙂<&two words"));
   assert.equal(text.includes("stale"), false);
   assert.ok(messages[0].text.includes("&lt;&amp;"));
-  assert.match(visible(await f.run(["命令🙂<&ping"])), /ping 帮助/);
-  assert.match(visible(await f.run(["two", "words"])), /命令🙂<&two words \[参数\]/);
+  assert.match(messages[0].text, /前缀 命令🙂&lt;&amp; · !!/);
+  const ping = await f.run(["命令🙂<&ping"]);
+  assert.match(ping[0].text, /^<b>🏓 ping<\/b>/);
+  assert.match(ping[0].text, /<code>命令🙂&lt;&amp;help<\/code> 返回帮助中心/);
+  assert.equal(ping[0].text.includes("&lt;code&gt;"), false);
+  const alias = await f.run(["two", "words"]);
+  assert.match(alias[0].text, /^<b>🏓 ping<\/b>/);
+  assert.match(visible(alias), /💡 用法：命令🙂<&two words \[参数\]/);
 });
 
 test("alias lookup uses longest matching alias and one host-style expansion", async (t) => {
   const f = fixture(t, [plugin("first", ["one"]), plugin("second", ["two"])]);
   f.setConfiguration({ prefixes: ["."], aliases: { go: "one", "go now": "two preset", one: "two", loop: "missing" } });
-  assert.match(visible(await f.run(["go", "now", "extra"])), /second 帮助/);
-  assert.match(visible(await f.run(["go"])), /first 帮助/);
-  assert.match(visible(await f.run(["one"])), /first 帮助/);
-  assert.match(visible(await f.run(["loop"])), /未找到命令或模块/);
+  assert.match((await f.run(["go", "now", "extra"]))[0].text, /^<b>🧩 second<\/b>/);
+  assert.match((await f.run(["go"]))[0].text, /^<b>🧩 first<\/b>/);
+  assert.match((await f.run(["one"]))[0].text, /^<b>🧩 first<\/b>/);
+  assert.match(visible(await f.run(["loop"])), /❌ 未找到/);
 });
 
 test("real single-token commands take precedence over aliases while longer aliases still resolve", async (t) => {
   const f = fixture(t, [plugin("first", ["one"]), plugin("second", ["two"])]);
   f.setConfiguration({ prefixes: ["."], aliases: { one: "two", "one now": "two preset" } });
   for (const args of [["one"], [".one"], ["one", "extra"], [".one", "extra"]]) {
-    const text = visible(await f.run(args));
-    assert.match(text, /first 帮助/);
-    assert.match(text, /使用方法： .one \[参数\]/);
+    const messages = await f.run(args);
+    const text = visible(messages);
+    assert.match(messages[0].text, /^<b>🧩 first<\/b>/);
+    assert.match(text, /💡 用法：\.one \[参数\]/);
   }
   for (const args of [["one", "now"], [".one", "now", "extra"]]) {
-    const text = visible(await f.run(args));
-    assert.match(text, /second 帮助/);
-    assert.match(text, /使用方法： .one now \[参数\]/);
+    const messages = await f.run(args);
+    const text = visible(messages);
+    assert.match(messages[0].text, /^<b>🧩 second<\/b>/);
+    assert.match(text, /💡 用法：\.one now \[参数\]/);
   }
 });
 
@@ -264,7 +275,7 @@ test("current configuration and catalog are read per invocation without stale un
   assert.match(text, /新🙂now/);
   assert.equal(text.includes(".ping"), false);
   assert.equal(text.includes("removed"), false);
-  assert.match(visible(await f.run(["removed"])), /未找到命令或模块/);
+  assert.match(visible(await f.run(["removed"])), /❌ 未找到/);
 });
 
 test("command and module details include complete command descriptions and cron metadata", async (t) => {
@@ -276,10 +287,13 @@ test("command and module details include complete command descriptions and cron 
   for (const query of ["one", "ONE", "tools"]) {
     const messages = await f.run([query]);
     const text = visible(messages);
+    assert.match(text, /📖 功能说明/);
     assert.match(text, /模块 完整说明/);
+    assert.match(text, /⚙️ 可用命令/);
     assert.match(text, /第一个命令/);
     assert.match(text, /第二个命令/);
     assert.ok(text.includes('job<&"'));
+    assert.match(text, /⏰ 定时任务/);
     assert.match(text, /完整任务说明/);
     assert.match(text, /0 0 \* \* \*/);
   }
@@ -312,7 +326,8 @@ test("unknown queries and untrusted labels are escaped instead of injecting HTML
   assert.ok(visible(messages).includes('<b>missing</b>&"'));
   assert.equal(messages.some((message) => message.text.includes("<b>missing</b>")), false);
   messages = await f.run(["cmd"]);
-  assert.ok(visible(messages).includes('module<&" 帮助'));
+  assert.ok(visible(messages).includes('module<&"'));
+  assert.match(messages[0].text, /^<b>🧩 module&lt;&amp;"<\/b>/);
 });
 
 test("hundreds of single entries paginate without dropping commands or exceeding entities", async (t) => {
@@ -496,7 +511,7 @@ test("display name persists, escapes HTML, resets, and allows owner changes acro
   assert.equal(getBotName(), "Cat <Bot> & Co");
   assert.equal(brandText("MiBot 重启"), "Cat &lt;Bot&gt; &amp; Co 重启");
   await run([]);
-  assert.ok(f.sent.some(s => s.text.includes("Cat &lt;Bot&gt; &amp; Co 控制台")));
+  assert.ok(f.sent.some(s => s.text.includes("Cat &lt;Bot&gt; &amp; Co 帮助中心")));
   assert.ok(f.sent.some(s => s.text.includes('href="https://github.com/MiCat-S/Mi-Box"')));
   setBotName("temporary");
   await help.setup!(context);
