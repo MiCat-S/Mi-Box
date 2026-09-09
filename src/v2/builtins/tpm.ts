@@ -7,10 +7,10 @@ import {isOwnerOrGroupSendAs} from "../permissions";
 import {code, command, concat, text, type Html} from "../ui/text";
 import {renderDocument, richText, section} from "../ui/document";
 import {renderFeedback} from "../ui/feedback";
+import {isPluginId, resolvePluginId} from "../plugin-id";
 
 const htmlOptions = {parseMode: "html", linkPreview: false} as const;
 type Candidate = {id: string; revision?: string; error?: string};
-const validId = (id: string) => /^[a-z][a-z0-9_-]{0,63}$/.test(id);
 
 function errorCode(error: unknown): string {
   const allowed = new Set(["STATE", "CONFLICT", "STOP", "ACTIVATE", "RESTORE", "SPAWN_FAILED",
@@ -105,7 +105,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       if (!["search", "s", "install", "i", "remove", "rm", "update"].includes(sub)) {
         await ctx.telegram.edit(invocation.message, `${invocation.prefix}tpm search [关键词]\n${invocation.prefix}tpm install|remove|update 插件名\n${invocation.prefix}tpm install|update|remove all\n${invocation.prefix}tpm list`); return;
       }
-      if (!["search", "s"].includes(sub) && (!id || !/^[a-z][a-z0-9_-]{0,63}$/.test(id) || invocation.args.length !== 2)) {
+      if (!["search", "s"].includes(sub) && (!id || !isPluginId(id) || invocation.args.length !== 2)) {
         await ctx.telegram.edit(invocation.message, "请提供一个有效的插件名"); return;
       }
       busy = true;
@@ -115,8 +115,8 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           await ctx.telegram.edit(invocation.message, renderFeedback({state: "working", title: "正在读取 V2 插件仓库…"}), htmlOptions);
           const {ids} = await repository(ctx, "search");
           const query = invocation.args.slice(1).join(" ").trim().toLowerCase();
-          const matches = (ids ?? []).filter(name => /^[a-z][a-z0-9_-]{0,63}$/.test(name) &&
-            name.includes(query) && !["ai", "gt"].includes(name));
+          const matches = (ids ?? []).filter(name => isPluginId(name) &&
+            name.toLowerCase().includes(query) && !["ai", "gt"].includes(name));
           const output = await listView(matches, "可安装扩展", invocation.prefix,
             "仓库结果仅包含允许安装的 V2 扩展", query);
           for (const [index, page] of output.entries()) {
@@ -136,13 +136,13 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           }
           await ctx.telegram.edit(invocation.message,
             renderFeedback({state: "working", title: removing ? "正在卸载全部已安装扩展…" : updating ? "正在下载并构建已安装扩展…" : "正在下载并构建全部可安装扩展…"}), htmlOptions);
-          const excluded = new Set(host.listPlugins().map(plugin => plugin.id).filter(validId));
+          const excluded = new Set(host.listPlugins().map(plugin => plugin.id).filter(isPluginId));
           const result = removing ? {ids: targets, candidates: targets.map(id => ({id}) as Candidate)}
             : updating ? await repository(ctx, "build-selected", ...targets)
             : await repository(ctx, "build-all", ...excluded);
           if (!Array.isArray(result.ids) || !Array.isArray(result.candidates) ||
-              result.ids.some(value => typeof value !== "string" || !validId(value)) ||
-              result.candidates.some(value => !value || typeof value.id !== "string" || !validId(value.id))) {
+              result.ids.some(value => typeof value !== "string" || !isPluginId(value)) ||
+              result.candidates.some(value => !value || typeof value.id !== "string" || !isPluginId(value.id))) {
             throw new Error("Invalid candidates");
           }
           if (updating && (result.candidates.length !== targets.length ||
@@ -192,25 +192,38 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           }
           return;
         }
-        const installed = releases.snapshot().generations.some(item => item.id === id);
-        if (host.pluginState(id) && !installed) {
-          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
-        }
+        const installedIds = releases.snapshot().generations.map(item => item.id);
         if (sub === "remove" || sub === "rm") {
+          if (host.pluginState(id) && !installedIds.includes(id)) {
+            await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
+          }
+          const resolved = resolvePluginId(id, installedIds);
+          if ("error" in resolved) {
+            await ctx.telegram.edit(invocation.message, resolved.error === "AMBIGUOUS"
+              ? `插件名 ${id} 存在大小写冲突，请使用完整名称`
+              : `未安装扩展 ${id}`);
+            return;
+          }
+          const canonical = resolved.id;
           stage = "unload";
-          await releases.remove(id);
+          await releases.remove(canonical);
           await ctx.telegram.edit(invocation.message, renderFeedback({
-            state: "success", title: "卸载完成", detail: `${id} · 配置数据已保留`,
+            state: "success", title: "卸载完成", detail: `${canonical} · 配置数据已保留`,
           }), htmlOptions);
         } else {
           await ctx.telegram.edit(invocation.message,
             renderFeedback({state: "working", title: `正在下载并构建 ${id}…`}), htmlOptions);
           const candidate = await repository(ctx, "build", id);
-          if (candidate.id !== id || !candidate.revision) throw new Error("Invalid candidate");
+          const canonical = candidate.id;
+          if (!canonical || !isPluginId(canonical) || !candidate.revision) throw new Error("Invalid candidate");
+          const installed = installedIds.includes(canonical);
+          if (host.pluginState(canonical) && !installed) {
+            await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
+          }
           stage = "activate";
-          await releases.activate(id, candidate.revision);
+          await releases.activate(canonical, candidate.revision);
           await ctx.telegram.edit(invocation.message, renderFeedback({
-            state: "success", title: `${installed ? "更新" : "安装"}完成`, detail: `${id} · 已加载`,
+            state: "success", title: `${installed ? "更新" : "安装"}完成`, detail: `${canonical} · 已加载`,
           }), htmlOptions);
         }
       } catch (error) {

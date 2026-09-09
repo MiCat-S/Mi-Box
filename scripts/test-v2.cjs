@@ -35,6 +35,7 @@ tests.push(path.join(__dirname, 'login-v2.test.cjs'));
 tests.push(path.join(__dirname, 'install-service.test.cjs'));
 tests.push(path.join(__dirname, 'default-plugins.test.cjs'));
 tests.push(path.join(__dirname, 'plugin-repository.test.cjs'));
+tests.push(path.join(__dirname, 'tpm-id-rules.test.cjs'));
 tests.push(path.join(__dirname, 'owner-sendas.test.cjs'));
 tests.push(path.join(__dirname, 'v2-entrypoints.test.cjs'));
 const extensionTests = fs.readdirSync(path.join(plugins, 'scripts'), {withFileTypes: true})
