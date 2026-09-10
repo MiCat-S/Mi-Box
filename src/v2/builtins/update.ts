@@ -1,3 +1,4 @@
+import {text} from "../ui/text";
 import {brandText} from "../branding";
 import {definePlugin, type PluginContext} from "../sdk";
 import {randomUUID} from "node:crypto";
@@ -23,6 +24,38 @@ const statusFields: readonly ServiceStatusField[] = [
   "FragmentPath",
   "Result",
 ];
+
+function renderHelp(prefix: string): string {
+  const p = text(prefix);
+  return `🔄 <b>程序更新</b>
+
+检查版本、拉取远端信息，或启动主程序更新服务。
+
+<b>命令：</b>
+• <code>${p}update ver</code> — 查看当前版本；也可用 <code>${p}update version</code>
+• <code>${p}update check</code> — 获取 origin/main 的最新 Git 信息，当前运行版本保持不变
+• <code>${p}update</code> — 立即启动主程序更新；等同于 <code>${p}update run</code> 或 <code>${p}update now</code>
+• <code>${p}update auto</code> — 查看自动更新开关
+• <code>${p}update auto on</code> / <code>${p}update auto off</code> — 保存开关状态；当前版本的后台行为仅为保存配置
+
+<b>使用示例：</b>
+1. <code>${p}update ver</code> 查看版本
+2. <code>${p}update check</code> 获取远端更新信息
+3. <code>${p}update run</code> 启动更新，等待完成回执
+
+<b>运行条件与结果：</b>
+• 检查和执行更新由账号本人操作，支持本账号在群内以频道身份发出的新命令。
+• 需要 Linux、systemd、root 身份运行的主程序，以及已安装的更新服务。
+• 更新任务会检查依赖并重建运行时，成功后重启服务；短暂断开连接属于重启过程。
+• 同时只能执行一个更新任务；遇到“已有更新任务”时等待回执。
+• 自动更新开关目前不会触发后台更新；手动更新使用 run。
+
+<b>常见问题：</b>
+• 权限或服务检查失败：按回执中的服务名、日志命令排查。
+• 仅查看当前版本时可使用 <code>${p}version</code>。
+• 扩展插件通过 <code>${p}tpm update 插件名</code> 或 <code>${p}tpm update all</code> 更新。
+• <code>${p}update help</code> / <code>${p}help update</code> 查看本说明。`;
+}
 
 export default function createUpdate(root = process.cwd(), ownerId?: string) {
   const bootId = randomUUID();
@@ -149,10 +182,10 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
       }
     });
   };
-  const definition = definePlugin({apiVersion: 1, id: "update", description: "检查并更新程序",
+  const definition = definePlugin({apiVersion: 1, id: "update", renderHelp, description: "检查并更新程序",
     setup(ctx) { context = ctx; },
     cleanup() { context = undefined; },
-    commands: {update: {description: "查看版本与自动更新状态", async handle(invocation, ctx) {
+    commands: {update: {helpArgs: ["help", "h"], description: "查看版本与自动更新状态", async handle(invocation, ctx) {
       const sub = invocation.args[0]?.toLowerCase() ?? "run";
       if (sub === "ver" || sub === "version") {
         let version = "未知";
