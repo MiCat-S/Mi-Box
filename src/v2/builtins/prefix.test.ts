@@ -8,6 +8,7 @@ import { parse } from "dotenv";
 import { PluginHost } from "../host";
 import { PrefixEnvStore, prefixesFromEnv, type PrefixPersistence } from "../prefixes";
 import { definePlugin, type MessageEnvelope, type MessageOptions, type PluginContext } from "../sdk";
+import { renderCommandHelp } from "../commands";
 import { createPrefix } from "./prefix";
 
 const SECRET = "prefix-private-fixture-753";
@@ -80,13 +81,13 @@ test("factory is synchronous and pure, with explicit configuration and persisten
     configuration() { reads += 1; return { prefixes: prefixesFromEnv(env), aliases: {} }; },
     replacePrefixes() { assert.fail("factory published prefixes"); },
   }, { async persist() { assert.fail("factory persisted prefixes"); } });
-  assert.equal(reads, 1);
+  assert.equal(reads, 0);
   assert.equal(definition.id, "prefix");
   assert.equal("then" in definition, false);
   assert.equal(definition.setup, undefined);
   assert.equal(definition.cleanup, undefined);
   assert.deepEqual(Object.keys(definition.commands), ["prefix"]);
-  assert.match(definition.description, /&amp;prefix/);
+  assert.match(renderCommandHelp("prefix", definition.commands.prefix, {prefix: "&"}), /&amp;prefix/);
   assert.deepEqual(env, { TB_PREFIX: "&" });
 });
 

@@ -10,6 +10,13 @@ const core = path.resolve(__dirname, '..');
 const defaultPlugins = fs.existsSync(path.resolve(core, '../mibot-plugins'))
   ? path.resolve(core, '../mibot-plugins') : path.resolve(core, '../TeleBox-Plugins');
 
+function pluginIds(plugins) {
+  return fs.readdirSync(plugins, {withFileTypes: true})
+    .filter(entry => entry.isDirectory() && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(entry.name) &&
+      fs.existsSync(path.join(plugins, entry.name, 'v2.ts')))
+    .map(entry => entry.name).sort();
+}
+
 async function verifyOne(id, plugins, PluginHost) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `mibox-v2-${id}-`)));
   const artifact = buildPlugin({id, packageRoot: path.join(plugins, id), entry: 'v2.ts', rootDir: core});
@@ -40,8 +47,7 @@ async function verifyOne(id, plugins, PluginHost) {
 
 async function main() {
   const plugins = fs.realpathSync(process.argv[2] || defaultPlugins);
-  const catalog = JSON.parse(fs.readFileSync(path.join(plugins, 'plugins.json'), 'utf8'));
-  const ids = Object.keys(catalog).filter(id => fs.existsSync(path.join(plugins, id, 'v2.ts'))).sort();
+  const ids = pluginIds(plugins);
   build();
   const {PluginHost} = require(path.join(core, 'dist/v2/host.js'));
   const revisions = {};
@@ -54,4 +60,4 @@ if (require.main === module) main().catch(error => {
   process.exitCode = 1;
 });
 
-module.exports = {verifyOne};
+module.exports = {verifyOne, pluginIds};

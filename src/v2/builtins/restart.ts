@@ -1,6 +1,6 @@
 import {brandText} from "../branding";
 import {randomUUID} from "node:crypto";
-import {definePlugin, type PluginContext} from "../sdk";
+import {STRUCTURED_PLUGIN_API_VERSION, definePlugin, type PluginContext} from "../sdk";
 import {isOwnerOrGroupSendAs} from "../permissions";
 
 const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
@@ -46,10 +46,30 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
       return "未能读取运行时用户信息。";
     }
   };
-  const definition = definePlugin({apiVersion: 1, id: "restart", description: "重启 systemd 服务",
+  const definition = definePlugin({apiVersion: STRUCTURED_PLUGIN_API_VERSION, id: "restart", description: "重启 systemd 服务",
     setup(ctx) { context = ctx; },
     cleanup() { context = undefined; },
-    commands: {restart: {description: "重启当前服务", ignoreEdited: true, async handle(invocation, ctx) {
+    commands: {restart: {
+      description: "重启当前服务",
+      ignoreEdited: true,
+      args: "",
+      arguments: [],
+      examples: [{args: "", description: "提交重启请求；服务重启后发送成功回执"}],
+      help: [
+        {
+          heading: "运行条件",
+          body: "• 由账号本人操作，支持本账号在群内以频道身份发出的新命令。\n" +
+            "• 需要 systemd 服务 <code>mibot.service</code>，且主程序有重启该服务的权限。",
+        },
+        {
+          heading: "确认与回执",
+          body: "• 提交后先发送“正在提交重启请求…”。\n" +
+            "• 服务重新启动并接回后会发送“MiBot 重启成功”回执。\n" +
+            "• 重启命令失败时显示服务状态、当前运行用户和排查命令。\n" +
+            "• 同一时间只接受一个重启请求，重复提交会提示“重启请求已提交，请稍候”。",
+        },
+      ],
+      async handle(invocation, ctx) {
       ctx.signal.throwIfAborted();
       if (!isOwnerOrGroupSendAs(invocation.message, ownerId)) {
         await ctx.telegram.edit(invocation.message, "没有重启服务的权限");

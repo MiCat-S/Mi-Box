@@ -9,12 +9,69 @@ import {SqliteStore, type SqliteConnection, type SqliteOptions} from "./sqlite";
 import {DEFAULT_PROCESS_LIMITS, resolveProcessLimits, ScopedProcesses, type ProcessLimits, type ProcessRunOptions} from "./processes";
 import {SettingsRegistry} from "./settings";
 import {ScopedFiles} from "./files";
-import { definePlugin, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type TelegramPort } from "./sdk";
+import { definePlugin, type CommandDefinition, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type MessageFilter, type TelegramPort } from "./sdk";
 import {renderRichText} from "./ui/document";
+import {renderCommandHelp, resolveHelpPath, type CommandHelpSource, type SubcommandDefinition, type SubcommandHelpSource} from "./commands";
+
+/** Admission is evaluated before any business handler receives the message. */
+function admitsMessage(message: MessageEnvelope, filter: MessageFilter | undefined): boolean {
+  if (!filter) return true;
+  const direction = message.direction ?? (message.outgoing ? "outgoing" : "incoming");
+  const saved = message.saved === true;
+  if (filter.direction !== undefined && filter.direction !== direction && !(saved && filter.includeSaved === true)) return false;
+  if (filter.chats !== undefined) {
+    const chatType = message.chatType ?? "unknown";
+    if (chatType === "unknown" || !filter.chats.includes(chatType)) return false;
+  }
+  if (filter.ignoreForwarded === true && message.forwarded === true) return false;
+  return true;
+}
 
 interface PluginStorage { json: StorageRoot; sqlite: Map<string, {store: SqliteStore; readonly: boolean; timeoutMs: number}>; }
 interface LoadedPlugin { definition: PluginDefinition; scope: ResourceScope; storage: PluginStorage; context: PluginContext; ready: boolean; owner?: object; }
 interface CommandTarget { plugin: LoadedPlugin; name: string; }
+
+/** Deep-frozen, handler-free subcommand metadata including nested levels. */
+function describeSubcommand(sub: SubcommandDefinition): SubcommandHelpSource {
+  const nested = sub.subcommands
+    ? Object.freeze(Object.fromEntries(Object.entries(sub.subcommands).map(([name, child]) => [name, describeSubcommand(child)])))
+    : undefined;
+  return Object.freeze({
+    description: sub.description,
+    ...(sub.aliases ? {aliases: Object.freeze([...sub.aliases])} : {}),
+    ...(sub.args !== undefined ? {args: sub.args} : {}),
+    ...(sub.alternates ? {alternates: Object.freeze(sub.alternates.map(variant => Object.freeze({...variant})))} : {}),
+    ...(sub.arguments ? {arguments: Object.freeze(sub.arguments.map(argument => Object.freeze({...argument})))} : {}),
+    ...(sub.examples ? {examples: Object.freeze(sub.examples.map(example => Object.freeze({...example})))} : {}),
+    ...(sub.help ? {help: Object.freeze(sub.help.map(section => Object.freeze({...section})))} : {}),
+    ...(nested ? {subcommands: nested} : {}),
+    ...(sub.defaultSubcommand !== undefined ? {defaultSubcommand: sub.defaultSubcommand} : {}),
+    ...(sub.subcommandsCaseSensitive !== undefined ? {subcommandsCaseSensitive: sub.subcommandsCaseSensitive} : {}),
+    ...(sub.caseSensitive !== undefined ? {caseSensitive: sub.caseSensitive} : {}),
+    ...(sub.group !== undefined ? {group: sub.group} : {}),
+    ...(sub.notes ? {notes: Object.freeze([...sub.notes])} : {}),
+    ...(sub.public !== undefined ? {public: sub.public} : {}),
+  });
+}
+
+/** Immutable command metadata snapshot exposed to the help center. Handlers are never exposed. */
+function describeCommand(name: string, command: CommandDefinition): CommandHelpSource & {name: string} {
+  const subcommands = command.subcommands
+    ? Object.freeze(Object.fromEntries(Object.entries(command.subcommands).map(([subName, sub]) => [subName, describeSubcommand(sub)])))
+    : undefined;
+  return Object.freeze({
+    name, description: command.description,
+    ...(command.args !== undefined ? {args: command.args} : {}),
+    ...(command.alternates ? {alternates: Object.freeze(command.alternates.map(variant => Object.freeze({...variant})))} : {}),
+    ...(command.arguments ? {arguments: Object.freeze(command.arguments.map(argument => Object.freeze({...argument})))} : {}),
+    ...(command.examples ? {examples: Object.freeze(command.examples.map(example => Object.freeze({...example})))} : {}),
+    ...(command.help ? {help: Object.freeze(command.help.map(section => Object.freeze({...section})))} : {}),
+    ...(subcommands ? {subcommands} : {}),
+    ...(command.defaultSubcommand !== undefined ? {defaultSubcommand: command.defaultSubcommand} : {}),
+    ...(command.subcommandsCaseSensitive !== undefined ? {subcommandsCaseSensitive: command.subcommandsCaseSensitive} : {}),
+    ...(command.helpArgs ? {helpArgs: Object.freeze([...command.helpArgs])} : {}),
+  });
+}
 
 export interface HostOptions {
   storageRoot: string;
@@ -97,7 +154,7 @@ export class PluginHost {
     return [...this.plugins.values()].filter(plugin => plugin.ready).map(({definition}) => ({
       id: definition.id, description: definition.description,
       ...(definition.renderHelp ? {renderHelp: definition.renderHelp} : {}),
-      commands: Object.entries(definition.commands).map(([name, command]) => ({name, description: command.description})),
+      commands: Object.entries(definition.commands).map(([name, command]) => describeCommand(name, command)),
       jobs: Object.entries(definition.jobs ?? {}).map(([name, job]) => ({name, cron: job.cron, description: job.description})),
     }));
   }
@@ -348,13 +405,36 @@ export class PluginHost {
     if (!target?.plugin.ready) return Promise.resolve(false);
     const command = target.plugin.definition.commands[target.name];
     if (message.edited && (command.ignoreEdited ?? true)) return Promise.resolve(false);
+    if (!admitsMessage(message, command)) return Promise.resolve(false);
     const snapshot = Object.freeze({...message, text: parsed.text});
     const plugin = target.plugin;
     return plugin.scope.run(`command:${target.name}`, () => this.executor.submit(`command:${message.chatId}:${message.id}`, async () => {
       plugin.scope.signal.throwIfAborted();
-      const explicitHelp = parsed.args.length === 1 && ["--help", ...(command.helpArgs ?? [])].includes(parsed.args[0].toLowerCase());
-      if (plugin.definition.renderHelp && (explicitHelp || (!parsed.args.length && command.helpOnEmpty))) {
-        const pages = await renderRichText(plugin.definition.renderHelp(parsed.prefix));
+      let helpSource: string | undefined;
+      if (plugin.definition.apiVersion >= 2) {
+        // Structured declarations resolve declared subcommand paths on top of the
+        // root help policy; free-text inputs are never captured.
+        const requestedPath = resolveHelpPath(command, parsed.args, command.helpArgs ?? []);
+        if (requestedPath) {
+          helpSource = requestedPath.length === 0 && plugin.definition.renderHelp
+            ? plugin.definition.renderHelp(parsed.prefix)
+            : renderCommandHelp(target.name, command, {prefix: parsed.prefix, path: requestedPath});
+        } else if (!parsed.args.length && command.helpOnEmpty) {
+          helpSource = plugin.definition.renderHelp?.(parsed.prefix)
+            ?? renderCommandHelp(target.name, command, {prefix: parsed.prefix});
+        }
+      } else if (plugin.definition.renderHelp) {
+        // Legacy declaration keeps its historical behavior: only a root renderHelp
+        // with an exact one-token help request or an empty helpOnEmpty invocation
+        // is intercepted; everything else stays with the business handler.
+        const explicitHelp = parsed.args.length === 1 &&
+          ["--help", ...(command.helpArgs ?? [])].includes(parsed.args[0].toLowerCase());
+        if (explicitHelp || (!parsed.args.length && command.helpOnEmpty)) {
+          helpSource = plugin.definition.renderHelp(parsed.prefix);
+        }
+      }
+      if (helpSource !== undefined) {
+        const pages = await renderRichText(helpSource);
         for (const [index, page] of pages.entries()) {
           plugin.scope.signal.throwIfAborted();
           const options = {parseMode: "html", linkPreview: false} as const;
@@ -378,6 +458,7 @@ export class PluginHost {
         if (message.edited && !listener.edited) continue;
         if (listener.ignoreCommands && (message.text.trimStart().startsWith("/") ||
             this.prefixes.some(prefix => message.text.trimStart().startsWith(prefix)))) continue;
+        if (!admitsMessage(message, listener)) continue;
         work.push(plugin.scope.run(`listener:${plugin.definition.id}`, () => this.executor.submit(message.chatId,
           () => listener.handle(snapshot, plugin.context), plugin.scope.signal)));
       }

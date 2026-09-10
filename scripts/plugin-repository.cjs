@@ -36,7 +36,21 @@ function run(action, ...targets) {
       folded.set(key, group);
     }
     const collisions = [...folded.values()].filter(group => group.length > 1);
-    if (action === 'search') return {ids, collisions};
+    if (action === 'search') {
+      const descriptions = Object.create(null);
+      let descriptionsAvailable = true;
+      try {
+        const catalog = JSON.parse(git(['show', 'HEAD:plugins.json'], repository));
+        if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) throw new Error('Invalid plugin index');
+        for (const id of ids) {
+          const entry = Object.hasOwn(catalog, id) ? catalog[id] : undefined;
+          if (entry && typeof entry.desc === 'string' && entry.desc.trim()) {
+            descriptions[id] = entry.desc.replace(/\s+/g, ' ').trim();
+          }
+        }
+      } catch { descriptionsAvailable = false; }
+      return {ids, collisions, descriptions, descriptionsAvailable};
+    }
     // Resolve user input to the declared id so configuration paths keep their
     // original spelling (for example git_pr -> git_PR). Exact matches win;
     // only a non-exact case-fold collision is reported as AMBIGUOUS.

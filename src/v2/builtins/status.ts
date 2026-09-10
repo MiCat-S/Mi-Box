@@ -1,6 +1,6 @@
 import os from "node:os";
 import {getBotName} from "../branding";
-import {definePlugin} from "../sdk";
+import {STRUCTURED_PLUGIN_API_VERSION, definePlugin, type CommandDefinition} from "../sdk";
 import {bold, code, concat, field, text, type Html} from "../ui/text";
 
 export interface ProcessMemorySnapshot {
@@ -105,10 +105,27 @@ export function renderStatus(snapshot: StatusSnapshot): Html {
   );
 }
 
+const statusCommand: CommandDefinition = {
+  description: "查看运行状态",
+  args: "",
+  arguments: [],
+  examples: [{args: "", description: "查看当前运行环境、进程内存和系统资源"}],
+  help: [
+    {
+      heading: "输出内容",
+      body: "• 运行环境：运行时间、Node 版本、平台、PID。\n" +
+        "• 进程内存：RSS、JS Heap、External。\n" +
+        "• 系统资源：系统内存占用与 1 / 5 / 15 分钟负载。",
+    },
+    {heading: "说明", body: "快照来自当前进程与主机，不发起额外采样或网络请求。"},
+  ],
+  async handle(invocation, ctx) {
+    await ctx.telegram.edit(invocation.message, renderStatus(collectStatus()), {parseMode: "html", linkPreview: false});
+  },
+};
+
 export default function createStatus() {
-  return definePlugin({apiVersion: 1, id: "status", description: "查看运行状态",
-    commands: {status: {description: "查看运行状态", async handle(invocation, ctx) {
-      await ctx.telegram.edit(invocation.message, renderStatus(collectStatus()), {parseMode: "html", linkPreview: false});
-    }}}
+  return definePlugin({apiVersion: STRUCTURED_PLUGIN_API_VERSION, id: "status", description: "查看运行状态",
+    commands: {status: statusCommand},
   });
 }

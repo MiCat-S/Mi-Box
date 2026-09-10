@@ -6,13 +6,14 @@ const path = require('node:path');
 const child = require('node:child_process');
 const builder = require('./build-v2-plugin.cjs');
 
-function fixture(t, broken = new Set(), extra = '') {
+function fixture(t, broken = new Set(), extra = '', index = '{}') {
   const gitCalls = [], built = [];
   let stage;
   t.mock.method(child, 'spawnSync', (_command, args, options) => {
     const command = args.slice(2);
     gitCalls.push(command);
     if (command[0] === 'clone') stage = options.cwd;
+    if (command[0] === 'show') return {status: index === null ? 1 : 0, stdout: index ?? ''};
     return {status: 0, stdout: command[0] === 'ls-tree'
       ? 'ai/v2.ts\nbad/v2.ts\ndig/v2.ts\nweather/v2.ts\noutdated/old/v2.ts\nlegacy/old.ts\n' + extra : ''};
   });
@@ -39,6 +40,36 @@ test('batch preparation uses one checkout, excludes loaded entries and isolates 
   assert.equal(f.cleaned(), true);
   assert.doesNotMatch(JSON.stringify(result), /private-build-path/);
 });
+
+test('search reads descriptions from the same HEAD and keeps only actual V2 entries', t => {
+  const f = fixture(t, new Set(), 'git_PR/v2.ts\nconstructor/v2.ts\n', JSON.stringify({
+    dig: {desc: ' DNS\n记录查询 ', url: 'legacy/dig.ts'},
+    git_PR: {desc: 'GitHub 拉取请求'}, legacy: {desc: 'legacy-only'},
+    weather: {desc: 12}, bad: {},
+  }));
+  const result = f.run('search');
+  assert.deepEqual({...result.descriptions}, {dig: 'DNS 记录查询', git_PR: 'GitHub 拉取请求'});
+  assert.equal(result.descriptionsAvailable, true);
+  assert.ok(result.ids.includes('weather'));
+  assert.ok(result.ids.includes('constructor'));
+  assert.ok(!result.ids.includes('legacy'));
+  assert.deepEqual(f.gitCalls.filter(args => ['show', 'clone'].includes(args[0])).map(args => args[0]), ['clone', 'show']);
+  assert.deepEqual(f.gitCalls.find(args => args[0] === 'show'), ['show', 'HEAD:plugins.json']);
+  assert.equal(f.gitCalls.some(args => ['checkout', 'sparse-checkout'].includes(args[0])), false);
+  assert.deepEqual(f.built, []);
+  assert.equal(f.cleaned(), true);
+});
+
+for (const index of [null, '{broken', '[]', 'null', '12']) {
+  test(`search preserves names and reports unavailable description index: ${index}`, t => {
+    const f = fixture(t, new Set(), '', index);
+    const result = f.run('search');
+    assert.deepEqual(result.ids, ['ai', 'bad', 'dig', 'weather']);
+    assert.equal(result.descriptionsAvailable, false);
+    assert.deepEqual(Object.keys(result.descriptions), []);
+    assert.equal(f.cleaned(), true);
+  });
+}
 
 test('an already installed batch needs no checkout or builds', t => {
   const f = fixture(t);

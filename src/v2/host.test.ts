@@ -6,6 +6,8 @@ import path from "node:path";
 import {PluginHost, type HostOptions} from "./host";
 import {definePlugin, type PluginDefinition, type MessageEnvelope, type CommandInvocation, type PluginContext} from "./sdk";
 import {SelfDrainError} from "./lifecycle";
+import {createHelp} from "./builtins/help";
+import {HTMLParser} from "teleproto/extensions/html.js";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -583,4 +585,218 @@ test("independent command messages retain the configured concurrency bound", asy
     assert.deepEqual(entered, [1, 2, 3]);
     assert.equal(host.snapshot().queue.active, 2);
   } finally {gates.forEach(gate => gate.resolve()); await Promise.all(work);}
+});
+
+test("host admits commands and listeners only after direction, chat and forward filters pass", async t => {
+  const {host} = await fixture(t);
+  const calls: string[] = [];
+  await host.load(definePlugin({
+    apiVersion: 2, id: "classified", description: "classified",
+    commands: {
+      scoped: {description: "scoped", chats: ["supergroup"], handle() {calls.push("scoped");}},
+      strict: {description: "strict", ignoreForwarded: true, handle() {calls.push("strict");}},
+    },
+    listeners: [
+      {direction: "incoming", handle() {calls.push("incoming");}},
+      {direction: "outgoing", chats: ["supergroup"], handle() {calls.push("outgoing-supergroup");}},
+      {ignoreForwarded: true, handle() {calls.push("no-forward");}},
+      {direction: "outgoing", includeSaved: true, handle() {calls.push("outgoing-or-saved");}},
+    ],
+  }));
+  const base: MessageEnvelope = {id: 5, chatId: "1", senderId: "1", text: "hello", outgoing: false};
+  await host.dispatchListeners({...base, chatType: "broadcast"});
+  assert.deepEqual(calls, ["incoming", "no-forward"]);
+  calls.length = 0;
+  await host.dispatchListeners({...base, outgoing: true, chatType: "supergroup"});
+  assert.deepEqual(calls, ["outgoing-supergroup", "no-forward", "outgoing-or-saved"]);
+  calls.length = 0;
+  await host.dispatchListeners({...base, forwarded: true});
+  assert.deepEqual(calls, ["incoming"]);
+  calls.length = 0;
+  await host.dispatchListeners({...base, outgoing: true, chatType: "unknown"});
+  assert.deepEqual(calls, ["no-forward", "outgoing-or-saved"], "unknown never matches a restricted chat list");
+  calls.length = 0;
+  await host.dispatchListeners({...base, saved: true, outgoing: false});
+  assert.deepEqual(calls, ["incoming", "no-forward", "outgoing-or-saved"]);
+  calls.length = 0;
+  await host.dispatchListeners({...base, saved: false, outgoing: false});
+  assert.deepEqual(calls, ["incoming", "no-forward"]);
+  calls.length = 0;
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".scoped", chatType: "broadcast"}), false);
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".scoped", chatType: "supergroup"}), true);
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".strict", forwarded: true}), false);
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".strict"}), true);
+  assert.deepEqual(calls, ["scoped", "strict"]);
+});
+
+test("listPlugins exposes frozen structured command metadata without handlers", async t => {
+  const {host} = await fixture(t);
+  const definition = definePlugin({apiVersion: 2, id: "catalog", description: "catalog", commands: {
+    catalog: {
+      description: "catalog command", args: "[x]",
+      subcommands: {go: {description: "go", aliases: ["g"], args: "target", group: "Group", handle() {}}},
+      handle() {},
+    },
+  }});
+  await host.load(definition);
+  const [plugin] = host.listPlugins();
+  const [command] = plugin.commands;
+  assert.equal(command.args, "[x]");
+  const go = command.subcommands?.go;
+  assert.equal(go?.description, "go");
+  assert.deepEqual(go?.aliases, ["g"]);
+  assert.equal(go?.group, "Group");
+  assert.equal(Object.hasOwn(go ?? {}, "handle"), false);
+  assert.equal(Object.hasOwn(go ?? {}, "authorize"), false);
+  assert.equal(Object.isFrozen(command), true);
+  assert.equal(Object.isFrozen(command.subcommands), true);
+  assert.equal(Object.isFrozen(go), true);
+  assert.equal(Object.isFrozen(go?.aliases), true);
+  assert.equal(Object.isFrozen(definition.commands.catalog), true);
+  assert.equal(Object.isFrozen(definition.commands.catalog.subcommands?.go), true);
+});
+
+test("host.load keeps one authorization and one business execution across normalization", async t => {
+  const {host} = await fixture(t);
+  let checks = 0;
+  let business = 0;
+  const definition = definePlugin({apiVersion: 2, id: "auth", description: "auth", commands: {
+    auth: {
+      description: "auth", defaultSubcommand: "go",
+      subcommands: {go: {description: "go", handle() {business += 1;}}},
+      authorize() {checks += 1;},
+      handle() {business += 10;},
+    },
+  }});
+  await host.load(definition);
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".auth go"}), true);
+  assert.equal(await host.dispatchPrimary({...envelope, id: 2, text: ".auth"}), true);
+  assert.equal(await host.dispatchPrimary({...envelope, id: 3, text: ".auth nope"}), true);
+  assert.equal(checks, 3);
+  assert.equal(business, 12);
+
+  let deniedChecks = 0;
+  let deniedBusiness = 0;
+  await host.load(definePlugin({apiVersion: 2, id: "denied", description: "denied", commands: {
+    denied: {description: "denied", authorize() {deniedChecks += 1; return false;}, handle() {deniedBusiness += 1;}},
+  }}));
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".denied"}), true);
+  assert.equal(deniedChecks, 1);
+  assert.equal(deniedBusiness, 0);
+});
+
+test("declared subcommand help is served through the host and the help center without business", async t => {
+  const {host, edits} = await fixture(t, {prefixes: ["."]});
+  const calls: string[] = [];
+  await host.load(createHelp(host));
+  await host.load(definePlugin({apiVersion: 2, id: "demo", description: "demo module", commands: {
+    demo: {
+      description: "demo command", args: "<target>",
+      subcommands: {go: {
+        description: "go", args: "target", group: "Doing",
+        examples: [{args: "go x"}],
+        help: [{heading: "Need", body: "NEEDED_CONFIG"}], arguments: [{name: "target", description: "where"}],
+        handle() {calls.push("go");},
+      }},
+      help: [{heading: "Root", body: "ROOTDOC"}],
+      handle() {calls.push("fallback");},
+    },
+  }}));
+  const visible = () => edits.map(({text}) => HTMLParser.parse(text)[0]).join("\n");
+  edits.length = 0;
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".demo go --help"}), true);
+  const hostHelp = visible();
+  assert.match(hostHelp, /NEEDED_CONFIG/);
+  assert.match(hostHelp, /\.demo go target/);
+  assert.match(hostHelp, /\.demo go x/);
+  assert.doesNotMatch(hostHelp, /\.demo go go x/);
+  assert.doesNotMatch(hostHelp, /ROOTDOC/);
+  edits.length = 0;
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".demo --help"}), true);
+  assert.match(visible(), /ROOTDOC/);
+  assert.match(visible(), /\.demo <target>/);
+  edits.length = 0;
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".help demo go"}), true);
+  const centerHelp = visible();
+  assert.match(centerHelp, /NEEDED_CONFIG/);
+  assert.match(centerHelp, /\.demo go target/);
+  assert.match(centerHelp, /\.demo go x/);
+  assert.doesNotMatch(centerHelp, /\.demo go go x/);
+  assert.deepEqual(calls, [], "no help entry may run business");
+  edits.length = 0;
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".demo go z"}), true);
+  assert.deepEqual(calls, ["go"]);
+});
+
+test("metadata-only plugins render complete help through the help center without renderHelp", async t => {
+  const {host, edits} = await fixture(t, {prefixes: ["."]});
+  await host.load(createHelp(host));
+  await host.load(definePlugin({apiVersion: 2, id: "metaonly", description: "meta only module", commands: {
+    meta: {
+      description: "meta command", args: "[x]",
+      subcommands: {sub: {description: "sub", args: "y", help: [{heading: "Cfg", body: "CFG_NEEDED"}], handle() {}}},
+      help: [{heading: "Limits", body: "META_LIMITS"}],
+      handle() {},
+    },
+  }}));
+  edits.length = 0;
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".help meta"}), true);
+  const output = edits.map(({text}) => HTMLParser.parse(text)[0]).join("\n");
+  assert.match(output, /\.meta \[x\]/);
+  assert.match(output, /\.meta sub y/);
+  assert.match(output, /CFG_NEEDED/);
+  assert.match(output, /META_LIMITS/);
+});
+
+test("legacy apiVersion 1 plugins keep their historical help interception and business fallback", async t => {
+  const {host, edits} = await fixture(t, {prefixes: ["."]});
+  const calls: string[] = [];
+  await host.load(definePlugin({apiVersion: 1, id: "legacy", description: "legacy", commands: {
+    legacy: {description: "legacy", handle() {calls.push("business");}},
+  }}));
+  // No renderHelp: --help keeps going to the business handler, exactly as before.
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".legacy --help"}), true);
+  assert.deepEqual(calls, ["business"]);
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".legacy plain"}), true);
+  assert.deepEqual(calls, ["business", "business"]);
+
+  const withHelp = definePlugin({apiVersion: 1, id: "withhelp", description: "withhelp",
+    renderHelp: prefix => `<b>${prefix}withhelp GUIDE</b>`,
+    commands: {withhelp: {description: "withhelp", helpArgs: ["help"], helpOnEmpty: true, handle() {calls.push("withhelp-business");}}}});
+  await host.load(withHelp);
+  for (const text of [".withhelp --help", ".withhelp help", ".withhelp"]) {
+    edits.length = 0;
+    assert.equal(await host.dispatchPrimary({...envelope, text}), true);
+    assert.match(edits.map(({text: page}) => HTMLParser.parse(page)[0]).join("\n"), /withhelp GUIDE/, text);
+  }
+  assert.deepEqual(calls, ["business", "business"], "v1 renderHelp entries never run business");
+
+  // A v2 metadata-only declaration still serves root and declared-path help with no business.
+  const {host: metaHost, edits: metaEdits} = await fixture(t, {prefixes: ["."]});
+  await metaHost.load(definePlugin({apiVersion: 2, id: "metaonly", description: "meta", commands: {
+    meta: {description: "meta", args: "[x]", help: [{heading: "Docs", body: "META_ROOT"}],
+      subcommands: {sub: {description: "sub", args: "y", help: [{heading: "Docs", body: "META_SUB"}], handle() {assert.fail("help must not run business");}}},
+      handle() {assert.fail("help must not run business");}},
+  }}));
+  for (const text of [".meta --help", ".meta sub --help"]) {
+    metaEdits.length = 0;
+    assert.equal(await metaHost.dispatchPrimary({...envelope, text}), true);
+    const output = metaEdits.map(({text: page}) => HTMLParser.parse(page)[0]).join("\n");
+    assert.match(output, text.includes("sub") ? /META_SUB/ : /META_ROOT/, text);
+  }
+});
+
+test("listPlugins exposes per-node case policy in the frozen metadata tree", async t => {
+  const {host} = await fixture(t);
+  await host.load(definePlugin({apiVersion: 2, id: "mixed", description: "mixed", commands: {
+    mixed: {description: "mixed", subcommands: {
+      sensitive: {description: "sensitive", caseSensitive: true, handle() {}},
+      plain: {description: "plain", handle() {}},
+    }, handle() {}},
+  }}));
+  const [plugin] = host.listPlugins();
+  const subcommands = plugin.commands[0].subcommands;
+  assert.equal(subcommands?.sensitive.caseSensitive, true);
+  assert.equal(Object.hasOwn(subcommands?.plain ?? {}, "caseSensitive"), false);
+  assert.equal(Object.isFrozen(subcommands?.sensitive), true);
 });

@@ -1,12 +1,13 @@
-import {text} from "../ui/text";
+import {bold} from "../ui/text";
 import {brandText} from "../branding";
-import {definePlugin, type PluginContext} from "../sdk";
+import {STRUCTURED_PLUGIN_API_VERSION, definePlugin, type CommandDefinition, type CommandInvocation, type PluginContext} from "../sdk";
 import {randomUUID} from "node:crypto";
 import {readFile, unlink} from "node:fs/promises";
 import {setTimeout as delay} from "node:timers/promises";
 import path from "node:path";
 import {isOwnerOrGroupSendAs} from "../permissions";
 import type {ProcessError} from "../processes";
+import {renderCommandHelp} from "../commands";
 
 const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
 
@@ -24,38 +25,6 @@ const statusFields: readonly ServiceStatusField[] = [
   "FragmentPath",
   "Result",
 ];
-
-function renderHelp(prefix: string): string {
-  const p = text(prefix);
-  return `🔄 <b>程序更新</b>
-
-检查版本、拉取远端信息，或启动主程序更新服务。
-
-<b>命令：</b>
-• <code>${p}update ver</code> — 查看当前版本；也可用 <code>${p}update version</code>
-• <code>${p}update check</code> — 获取 origin/main 的最新 Git 信息，当前运行版本保持不变
-• <code>${p}update</code> — 立即启动主程序更新；等同于 <code>${p}update run</code> 或 <code>${p}update now</code>
-• <code>${p}update auto</code> — 查看自动更新开关
-• <code>${p}update auto on</code> / <code>${p}update auto off</code> — 保存开关状态；当前版本的后台行为仅为保存配置
-
-<b>使用示例：</b>
-1. <code>${p}update ver</code> 查看版本
-2. <code>${p}update check</code> 获取远端更新信息
-3. <code>${p}update run</code> 启动更新，等待完成回执
-
-<b>运行条件与结果：</b>
-• 检查和执行更新由账号本人操作，支持本账号在群内以频道身份发出的新命令。
-• 需要 Linux、systemd、root 身份运行的主程序，以及已安装的更新服务。
-• 更新任务会检查依赖并重建运行时，成功后重启服务；短暂断开连接属于重启过程。
-• 同时只能执行一个更新任务；遇到“已有更新任务”时等待回执。
-• 自动更新开关目前不会触发后台更新；手动更新使用 run。
-
-<b>常见问题：</b>
-• 权限或服务检查失败：按回执中的服务名、日志命令排查。
-• 仅查看当前版本时可使用 <code>${p}version</code>。
-• 扩展插件通过 <code>${p}tpm update 插件名</code> 或 <code>${p}tpm update all</code> 更新。
-• <code>${p}update help</code> / <code>${p}help update</code> 查看本说明。`;
-}
 
 export default function createUpdate(root = process.cwd(), ownerId?: string) {
   const bootId = randomUUID();
@@ -182,99 +151,175 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
       }
     });
   };
-  const definition = definePlugin({apiVersion: 1, id: "update", renderHelp, description: "检查并更新程序",
+
+  const authorizeOwner = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
+    if (isOwnerOrGroupSendAs(invocation.message, ownerId)) return true;
+    await ctx.telegram.edit(invocation.message, brandText("只有账号所有者可以更新 MiBot", false));
+    return false;
+  };
+
+  const showVersion = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
+    let version = "未知";
+    try { version = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version ?? version; } catch {}
+    await ctx.telegram.edit(invocation.message, `<b>更新状态</b>\n当前版本：<code>${escapeHtml(String(version))}</code>`, htmlOptions);
+  };
+
+  const autoSwitch = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
+    const store = ctx.storage.json<{enabled: boolean}>("config.json", {enabled: false});
+    const action = invocation.args[0]?.toLowerCase();
+    if (action === "on" || action === "off") {
+      await store.update(value => ({...value, enabled: action === "on"}));
+    }
+    const current = await store.read();
+    await ctx.telegram.edit(invocation.message,
+      `自动更新：<b>${current.enabled ? "开启" : "关闭"}</b>\n当前仅保存开关状态，不会在后台自动执行`, htmlOptions);
+  };
+
+  const rootCheck = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
+    const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    if (runningAsRoot) return true;
+    await ctx.telegram.edit(invocation.message,
+      brandText(`<b>MiBot 更新失败</b>\n当前进程 UID=${escapeHtml(String(typeof process.getuid === "function" ? process.getuid() : "unknown"))}，`) +
+      brandText("无法直接发起 systemd 服务更新。请让 MiBot 服务以 root 运行后再试（安装脚本会处理 service）。"), htmlOptions);
+    return false;
+  };
+
+  const checkUpdate = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
+    if (!await rootCheck(invocation, ctx)) return;
+    const result = await ctx.processes.run("/usr/bin/git", ["-C", root, "fetch", "origin", "main"], {timeoutMs: 30000, maxOutputBytes: 4000});
+    await ctx.telegram.edit(invocation.message,
+      `<b>更新检查完成</b>\n<pre>${escapeHtml(result.stdout.toString("utf8").slice(0, 3000))}</pre>`, htmlOptions);
+  };
+
+  const runUpdate = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
+    if (!await rootCheck(invocation, ctx)) return;
+    const receipt: Receipt = {ownerId: ownerId ?? "", chatId: invocation.message.chatId,
+      messageId: invocation.message.id, requestedAt: Date.now(), bootId};
+    const {pending} = await store(ctx).read();
+    if (pending) {
+      await ctx.telegram.edit(invocation.message,
+        brandText("<b>MiBot 更新</b>\n已有更新任务进行中，请稍后查看结果或稍后重试。"), htmlOptions);
+      return;
+    }
+    await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 更新</b>\n正在更新主程序、检查依赖并重建运行时…"), htmlOptions);
+    await store(ctx).update(() => ({pending: receipt}));
+    try {
+      const statusRows = await readServiceStatusRows(ctx);
+      const status = statusRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
+      const hint = serviceStatusHint(statusRows);
+      if (hint) {
+        submitted = false;
+        await reportFailure(ctx, receipt,
+          brandText(`<b>MiBot 更新失败</b>\n${hint}\n`) +
+          `服务检查结果：${status}\n\n请先执行：<code>bash scripts/install-service.sh</code> 或确认服务文件是否存在。\n` +
+          escapeHtml(processOwnerHint()));
+        return;
+      }
+      if (statusRows.some(({key, value}) => key === "ActiveState" && value === "failed")) {
+        await ctx.processes.run("/usr/bin/systemctl", ["reset-failed", updateService], {timeoutMs: 5000, maxOutputBytes: 2000});
+      }
+      await ctx.processes.run("/usr/bin/systemctl", ["daemon-reload"], {timeoutMs: 5000, maxOutputBytes: 2000});
+      await ctx.processes.run("/usr/bin/systemctl", ["start", "--no-block", updateService],
+        {timeoutMs: 5000, maxOutputBytes: 2000});
+      const startupRows = await readServiceStatusRows(ctx, ["LoadState", "ActiveState", "Result", "SubState", "FragmentPath"]);
+      const startupHint = serviceStartupFailureHint(startupRows);
+      if (startupHint) {
+        submitted = false;
+        const failureStatus = startupRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
+        await reportFailure(ctx, receipt,
+          brandText(`<b>MiBot 更新失败</b>\n${startupHint}\n`) +
+          `服务检查结果：${failureStatus}\n\n请查看服务日志：\n<code>journalctl -u ${updateService} -n 80 --no-pager</code>`);
+        return;
+      }
+      submitted = true;
+    } catch (error) {
+      submitted = false;
+      const logs = await readServiceLog(ctx);
+      const status = await readServiceStatus(ctx);
+      await reportFailure(ctx, receipt,
+        brandText(`<b>MiBot 更新失败</b>\n启动更新任务失败：${escapeHtml(summarizeProcessError(error))}\n\n服务状态：${status}\n\n请检查服务文件与权限：\n<code>systemctl status ${updateService} --no-pager</code>\n<code>journalctl -u ${updateService} -n 80 --no-pager</code>\n<code>systemctl show ${updateService}</code>\n`) +
+        `${escapeHtml(processOwnerHint())}${logs}`);
+      return;
+    }
+    watchResult(ctx, receipt);
+  };
+
+  const updateCommand: CommandDefinition = {
+    description: "查看版本与自动更新状态",
+    helpArgs: ["help", "h"],
+    defaultSubcommand: "run",
+    subcommands: {
+      ver: {
+        aliases: ["version"], group: "命令：",
+        description: "查看当前版本",
+        args: "",
+        examples: [{args: "ver"}],
+        handle: showVersion,
+      },
+      auto: {
+        group: "命令：",
+        description: "查看或保存自动更新开关；当前版本的后台行为仅为保存配置",
+        args: "[on|off]",
+        arguments: [{name: "on|off", description: "省略时只查看；填写 on/off 时保存开关状态"}],
+        examples: [{args: "auto"}, {args: "auto on"}, {args: "auto off"}],
+        handle: autoSwitch,
+      },
+      check: {
+        group: "命令：",
+        description: "获取 origin/main 的最新 Git 信息，当前运行版本保持不变",
+        args: "",
+        authorize: authorizeOwner,
+        examples: [{args: "check"}],
+        handle: checkUpdate,
+      },
+      run: {
+        aliases: ["now"], group: "命令：",
+        description: "立即启动主程序更新",
+        args: "",
+        authorize: authorizeOwner,
+        examples: [{args: "run"}, {args: ""}],
+        handle: runUpdate,
+      },
+    },
+    help: [
+      {
+        heading: "使用示例：",
+        body: "1. <code>{prefix}update ver</code> 查看版本\n2. <code>{prefix}update check</code> 获取远端更新信息\n3. <code>{prefix}update run</code> 启动更新，等待完成回执",
+      },
+      {
+        heading: "运行条件与结果：",
+        body: "• 检查和执行更新由账号本人操作，支持本账号在群内以频道身份发出的新命令。\n" +
+          "• 需要 Linux、systemd、root 身份运行的主程序，以及已安装的更新服务。\n" +
+          "• 更新任务会检查依赖并重建运行时，成功后重启服务；短暂断开连接属于重启过程。\n" +
+          "• 同时只能执行一个更新任务；遇到“已有更新任务”时等待回执。\n" +
+          "• 自动更新开关目前不会触发后台更新；手动更新使用 run。",
+      },
+      {
+        heading: "常见问题：",
+        body: "• 权限或服务检查失败：按回执中的服务名、日志命令排查。\n" +
+          "• 仅查看当前版本时可使用 <code>{prefix}version</code>。\n" +
+          "• 扩展插件通过 <code>{prefix}tpm update 插件名</code> 或 <code>{prefix}tpm update all</code> 更新。\n" +
+          "• <code>{prefix}update help</code> / <code>{prefix}help update</code> 查看本说明。",
+      },
+    ],
+    async handle(invocation, ctx) {
+      await ctx.telegram.edit(invocation.message, `用法：${invocation.prefix}update ver|check|run|auto`);
+    },
+  };
+
+  const definition = definePlugin({
+    apiVersion: STRUCTURED_PLUGIN_API_VERSION,
+    id: "update",
+    description: "检查并更新程序",
+    renderHelp: prefix => renderCommandHelp("update", updateCommand, {
+      prefix,
+      title: bold("🔄 程序更新"),
+      intro: "检查版本、拉取远端信息，或启动主程序更新服务。",
+      footer: [],
+    }),
     setup(ctx) { context = ctx; },
     cleanup() { context = undefined; },
-    commands: {update: {helpArgs: ["help", "h"], description: "查看版本与自动更新状态", async handle(invocation, ctx) {
-      const sub = invocation.args[0]?.toLowerCase() ?? "run";
-      if (sub === "ver" || sub === "version") {
-        let version = "未知";
-        try { version = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version ?? version; } catch {}
-        await ctx.telegram.edit(invocation.message, `<b>更新状态</b>\n当前版本：<code>${escapeHtml(String(version))}</code>`, htmlOptions);
-        return;
-      }
-      if (sub === "auto") {
-        const store = ctx.storage.json<{enabled: boolean}>("config.json", {enabled: false});
-        const action = invocation.args[1]?.toLowerCase();
-        if (action === "on" || action === "off") {
-          await store.update(value => ({...value, enabled: action === "on"}));
-        }
-        const current = await store.read();
-        await ctx.telegram.edit(invocation.message,
-          `自动更新：<b>${current.enabled ? "开启" : "关闭"}</b>\n当前仅保存开关状态，不会在后台自动执行`, htmlOptions);
-        return;
-      }
-      if (sub === "run" || sub === "now" || sub === "check") {
-        if (!isOwnerOrGroupSendAs(invocation.message, ownerId)) {
-          await ctx.telegram.edit(invocation.message, brandText("只有账号所有者可以更新 MiBot", false));
-          return;
-        }
-        const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
-        if (!runningAsRoot) {
-          await ctx.telegram.edit(invocation.message,
-            brandText(`<b>MiBot 更新失败</b>\n当前进程 UID=${escapeHtml(String(typeof process.getuid === "function" ? process.getuid() : "unknown"))}，`) +
-            brandText("无法直接发起 systemd 服务更新。请让 MiBot 服务以 root 运行后再试（安装脚本会处理 service）。"), htmlOptions);
-          return;
-        }
-        if (sub === "check") {
-          const result = await ctx.processes.run("/usr/bin/git", ["-C", root, "fetch", "origin", "main"], {timeoutMs: 30000, maxOutputBytes: 4000});
-          await ctx.telegram.edit(invocation.message,
-            `<b>更新检查完成</b>\n<pre>${escapeHtml(result.stdout.toString("utf8").slice(0, 3000))}</pre>`, htmlOptions);
-          return;
-        }
-        const receipt: Receipt = {ownerId: ownerId ?? "", chatId: invocation.message.chatId,
-          messageId: invocation.message.id, requestedAt: Date.now(), bootId};
-        const {pending} = await store(ctx).read();
-        if (pending) {
-          await ctx.telegram.edit(invocation.message,
-            brandText("<b>MiBot 更新</b>\n已有更新任务进行中，请稍后查看结果或稍后重试。"), htmlOptions);
-          return;
-        }
-        await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 更新</b>\n正在更新主程序、检查依赖并重建运行时…"), htmlOptions);
-        await store(ctx).update(() => ({pending: receipt}));
-        try {
-          const statusRows = await readServiceStatusRows(ctx);
-          const status = statusRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
-          const hint = serviceStatusHint(statusRows);
-          if (hint) {
-            submitted = false;
-            await reportFailure(ctx, receipt,
-              brandText(`<b>MiBot 更新失败</b>\n${hint}\n`) +
-              `服务检查结果：${status}\n\n请先执行：<code>bash scripts/install-service.sh</code> 或确认服务文件是否存在。\n` +
-              escapeHtml(processOwnerHint()));
-            return;
-          }
-          if (statusRows.some(({key, value}) => key === "ActiveState" && value === "failed")) {
-            await ctx.processes.run("/usr/bin/systemctl", ["reset-failed", updateService], {timeoutMs: 5000, maxOutputBytes: 2000});
-          }
-          await ctx.processes.run("/usr/bin/systemctl", ["daemon-reload"], {timeoutMs: 5000, maxOutputBytes: 2000});
-          await ctx.processes.run("/usr/bin/systemctl", ["start", "--no-block", updateService],
-            {timeoutMs: 5000, maxOutputBytes: 2000});
-          const startupRows = await readServiceStatusRows(ctx, ["LoadState", "ActiveState", "Result", "SubState", "FragmentPath"]);
-          const startupHint = serviceStartupFailureHint(startupRows);
-          if (startupHint) {
-            submitted = false;
-            const failureStatus = startupRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
-            await reportFailure(ctx, receipt,
-              brandText(`<b>MiBot 更新失败</b>\n${startupHint}\n`) +
-              `服务检查结果：${failureStatus}\n\n请查看服务日志：\n<code>journalctl -u ${updateService} -n 80 --no-pager</code>`);
-            return;
-          }
-          submitted = true;
-        } catch (error) {
-          submitted = false;
-          const logs = await readServiceLog(ctx);
-          const status = await readServiceStatus(ctx);
-          await reportFailure(ctx, receipt,
-            brandText(`<b>MiBot 更新失败</b>\n启动更新任务失败：${escapeHtml(summarizeProcessError(error))}\n\n服务状态：${status}\n\n请检查服务文件与权限：\n<code>systemctl status ${updateService} --no-pager</code>\n<code>journalctl -u ${updateService} -n 80 --no-pager</code>\n<code>systemctl show ${updateService}</code>\n`) +
-            `${escapeHtml(processOwnerHint())}${logs}`);
-          return;
-        }
-        watchResult(ctx, receipt);
-        return;
-      }
-      await ctx.telegram.edit(invocation.message, `用法：${invocation.prefix}update ver|check|run|auto`);
-    }}},
+    commands: {update: updateCommand},
   });
   return Object.freeze({...definition, async notifyReady(): Promise<void> {
     const ctx = context;

@@ -1,5 +1,7 @@
 # Mi Box V2 Runtime
 
+Core 0.5.0 command declarations, help, message filters and upgrade order are documented in [V2 SDK](../../docs/v2-sdk.md).
+
 ## Delivery Status
 
 The runtime targets TypeScript compiled ahead of time for Node.js 24. The current

@@ -144,8 +144,11 @@ test("live host installation update and unload immediately change help and detai
 test("help factory is side-effect-free and exports matching help/h handlers", async (t) => {
   const f = fixture(t, [plugin("ping")]);
   assert.equal(f.help.id, "help");
-  assert.equal(f.help.apiVersion, 1);
-  assert.equal(f.help.commands.help.handle, f.help.commands.h.handle);
+  assert.equal(f.help.apiVersion, 2);
+  assert.equal(typeof f.help.commands.help.handle, "function");
+  assert.equal(typeof f.help.commands.h.handle, "function");
+  assert.ok(Object.hasOwn(f.help.commands.help.subcommands ?? {}, "name"));
+  assert.ok(Object.hasOwn(f.help.commands.h.subcommands ?? {}, "name"));
   assert.deepEqual(f.calls, { plugins: 0, commands: 0, configuration: 0 });
   const first = visible(await f.run());
   assert.equal(visible(await f.run([], "h")), first);
@@ -280,8 +283,8 @@ test("current configuration and catalog are read per invocation without stale un
 
 test("command and module details include complete command descriptions and cron metadata", async (t) => {
   const module = plugin("tools", ["one", "two"], "模块 <b>完整说明</b>");
-  module.commands[0].description = "<i>第一个命令</i>";
-  module.commands[1].description = "第二个命令";
+  (module.commands[0] as {description: string}).description = "<i>第一个命令</i>";
+  (module.commands[1] as {description: string}).description = "第二个命令";
   module.jobs = [{ name: 'job<&"', cron: "0 0 * * *", description: "<b>完整任务说明</b>" }];
   const f = fixture(t, [module]);
   for (const query of ["one", "ONE", "tools"]) {
@@ -306,7 +309,7 @@ test("valid description HTML preserves nested tags, escaped text, links and expa
     '<pre><code class="language-js">if (x &lt; 2) return "好";</code></pre>\n' +
     '<a href="https://example.com/?a=1&amp;b=2">完整链接</a>';
   const entry = plugin("gt", ["gt"], description);
-  entry.commands[0].description = description;
+  (entry.commands[0] as {description: string}).description = description;
   const f = fixture(t, [entry]);
   const messages = await f.run(["gt"]);
   const html = messages.map((message) => message.text).join("\n");
@@ -360,7 +363,7 @@ test("hundreds of module commands and aliases preserve all commands across repli
 test("an entity-heavy single block falls back to complete safe text", async (t) => {
   const text = Array.from({ length: 150 }, (_, index) => `<b>token${index};</b>`).join("");
   const entry = plugin("rich", ["rich"], text);
-  entry.commands[0].description = "";
+  (entry.commands[0] as {description: string}).description = "";
   const f = fixture(t, [entry]);
   const messages = await f.run(["rich"]);
   const body = visible(messages);
@@ -373,7 +376,7 @@ test("long formatted single blocks retain all multi-byte text and hidden link ad
   const escaped = body.replace(/&/g, "&amp;").replace(/</g, "&lt;");
   const url = "https://example.com/complete-help?one=1&two=2";
   const entry = plugin("long", ["long"], `<blockquote>${escaped}<a href="${url.replace(/&/g, "&amp;")}">详情</a></blockquote>`);
-  entry.commands[0].description = "";
+  (entry.commands[0] as {description: string}).description = "";
   const f = fixture(t, [entry]);
   const messages = await f.run(["long"]);
   const text = visible(messages);
@@ -388,7 +391,7 @@ test("long formatted single blocks retain all multi-byte text and hidden link ad
 test("many complete description blocks retain formatting when crossing page boundaries", async (t) => {
   const lines = Array.from({ length: 200 }, (_, index) => `<b>段落${index}</b> 内容${index}`);
   const entry = plugin("many", ["many"], lines.join("\n"));
-  entry.commands[0].description = "";
+  (entry.commands[0] as {description: string}).description = "";
   const f = fixture(t, [entry]);
   const messages = await f.run(["many"]);
   assert.ok(messages.length > 2);
@@ -400,7 +403,7 @@ test("many complete description blocks retain formatting when crossing page boun
 test("a complete block at the entity budget moves intact to its own page", async (t) => {
   const block = Array.from({ length: 90 }, (_, index) => `<b>entry${index};</b>`).join("");
   const entry = plugin("boundary", ["boundary"], block);
-  entry.commands[0].description = "";
+  (entry.commands[0] as {description: string}).description = "";
   const f = fixture(t, [entry]);
   const messages = await f.run(["boundary"]);
   assert.ok(messages.some((message) => message.text === block));
@@ -417,7 +420,7 @@ test("very large alias lists are retained in safe pages", async (t) => {
 
 test("unsupported markup and unsafe URLs become escaped text without active tags", async (t) => {
   const entry = plugin("unsafe", ["unsafe"], '<script>private-source</script>\n<a href="javascript:alert(1)">link</a>');
-  entry.commands[0].description = "";
+  (entry.commands[0] as {description: string}).description = "";
   const f = fixture(t, [entry]);
   const messages = await f.run(["unsafe"]);
   const html = messages.map((message) => message.text).join("\n");
@@ -429,7 +432,7 @@ test("unsupported markup and unsafe URLs become escaped text without active tags
 
 test("empty descriptions have an explicit fallback", async (t) => {
   const entry = plugin("empty", ["empty"], "");
-  entry.commands[0].description = "";
+  (entry.commands[0] as {description: string}).description = "";
   const f = fixture(t, [entry]);
   assert.match(visible(await f.run(["empty"])), /暂无描述信息/);
 });

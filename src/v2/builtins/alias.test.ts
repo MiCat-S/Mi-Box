@@ -703,3 +703,16 @@ test("50 reload cycles retain committed aliases and release cancelled timers and
   assert.equal(f.targetCleanups(), 0);
   assert.deepEqual(f.rows(), [{ original: "short", final: "ping 49" }]);
 });
+
+test("alias generated help documents every standard subcommand from the shared definition", () => {
+  const definition = createAlias({
+    listCommands: () => [], configuration: () => ({prefixes: ["."], aliases: {}}), replaceAliases() {},
+  });
+  assert.equal(definition.apiVersion, 2);
+  const help = definition.renderHelp!(".");
+  assert.match(help, /<code>\.alias set \[别名\.\.\.\] \[原命令\.\.\.\]<\/code>/);
+  assert.match(help, /<code>\.alias del \[别名\.\.\.\]<\/code>/);
+  assert.match(help, /<code>\.alias ls<\/code>/);
+  assert.match(help, /简写：<code>\.alias list<\/code>/);
+  assert.match(help, /示例：<code>\.alias set a b<\/code>/);
+});

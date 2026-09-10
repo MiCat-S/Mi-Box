@@ -5,6 +5,7 @@ import { inspect } from "node:util";
 import test from "node:test";
 import { Api } from "teleproto";
 import type { TelegramClient } from "teleproto";
+import { CustomMessage } from "teleproto/tl/custom/message";
 import { returnBigInt } from "teleproto/Helpers";
 import { getPeerId } from "teleproto/Utils";
 import { NewMessage, NewMessageEvent } from "teleproto/events/NewMessage";
@@ -748,4 +749,71 @@ test("inline callback payloads stay in raw and are not inspected by generic adap
     Object.defineProperty(Api, "InlineButtonTypeCallback", descriptor);
     await scope.drain();
   }
+});
+
+test("envelope classifies chat type, direction and known entities without network access", () => {
+  const user = messageEnvelope(message({peerId: new Api.PeerUser({userId: returnBigInt(LARGE)}), out: false}));
+  assert.equal(user.chatType, "private");
+  assert.equal(user.direction, "incoming");
+  const group = messageEnvelope(message({peerId: new Api.PeerChat({chatId: returnBigInt(LARGE)}), out: true}));
+  assert.equal(group.chatType, "group");
+  assert.equal(group.direction, "outgoing");
+  const megagroup = messageEnvelope(message({post: false}));
+  assert.equal(megagroup.chatType, "supergroup");
+  const broadcast = messageEnvelope(message({post: true}));
+  assert.equal(broadcast.chatType, "broadcast");
+  const bare = messageEnvelope(message({post: undefined}));
+  assert.equal(bare.chatType, "unknown");
+
+  const raw = message({post: undefined});
+  Object.defineProperty(raw, "getChat", {value: () => assert.fail("classification must not fetch entities")});
+  const custom = new CustomMessage({id: 71, peerId: raw.peerId, date: 1, message: "fixture text"});
+  Object.defineProperty(custom, "getChat", {value: () => assert.fail("classification must not fetch entities")});
+  const channel = (broadcastFlag?: boolean, megagroupFlag?: boolean) => ({className: "Channel",
+    ...(broadcastFlag !== undefined ? {broadcast: broadcastFlag} : {}),
+    ...(megagroupFlag !== undefined ? {megagroup: megagroupFlag} : {})});
+  (custom as unknown as {_chat: unknown})._chat = channel(true);
+  assert.equal(messageEnvelope(custom as unknown as Api.Message).chatType, "broadcast");
+  (custom as unknown as {_chat: unknown})._chat = channel(false);
+  assert.equal(messageEnvelope(custom as unknown as Api.Message).chatType, "supergroup");
+  (custom as unknown as {_chat: unknown})._chat = channel(undefined, true);
+  assert.equal(messageEnvelope(custom as unknown as Api.Message).chatType, "supergroup", "explicit megagroup evidence is honored");
+  (custom as unknown as {_chat: unknown})._chat = channel(undefined, undefined);
+  assert.equal(messageEnvelope(custom as unknown as Api.Message).chatType, "unknown");
+  // A contradictory entity never overrides the wire post fact.
+  const contradiction = new CustomMessage({id: 71, peerId: raw.peerId, date: 1, message: "fixture text", post: false});
+  (contradiction as unknown as {_chat: unknown})._chat = channel(true);
+  assert.equal(messageEnvelope(contradiction as unknown as Api.Message).chatType, "unknown");
+  // An entity class contradictory to an explicit peer cannot relabel the chat.
+  const mislabeled = new CustomMessage({id: 71, peerId: raw.peerId, date: 1, message: "fixture text"});
+  (mislabeled as unknown as {_chat: unknown})._chat = {className: "User"};
+  assert.equal(messageEnvelope(mislabeled as unknown as Api.Message).chatType, "unknown");
+
+  const self = messageEnvelope(message({peerId: new Api.PeerUser({userId: returnBigInt(SELF)}), out: false}), {selfId: SELF});
+  assert.equal(self.saved, true);
+  assert.equal(self.chatType, "private");
+});
+
+test("chat classification treats missing post evidence and contradictory entities as unknown", () => {
+  const raw = message({post: undefined});
+  const custom = (post?: boolean | null) => new CustomMessage({id: 71, peerId: raw.peerId, date: 1, message: "fixture text", ...(post !== undefined ? {post} : {})} as never);
+  assert.equal(messageEnvelope(custom(null) as unknown as Api.Message).chatType, "unknown", "null post is no evidence, never supergroup");
+  assert.equal(messageEnvelope(custom(undefined) as unknown as Api.Message).chatType, "unknown");
+  // A contradictory entity is an explicit unknown and never falls back to the post fact.
+  for (const post of [true, false, undefined, null] as const) {
+    const contradictory = custom(post);
+    (contradictory as unknown as {_chat: unknown})._chat = {className: "Channel", broadcast: true, megagroup: true};
+    assert.equal(messageEnvelope(contradictory as unknown as Api.Message).chatType, "unknown", `post ${String(post)}`);
+  }
+  // Non-contradictory entity flags and the post fallback keep working.
+  const broadcast = custom();
+  (broadcast as unknown as {_chat: unknown})._chat = {className: "Channel", broadcast: true};
+  assert.equal(messageEnvelope(broadcast as unknown as Api.Message).chatType, "broadcast");
+  const megagroup = custom();
+  (megagroup as unknown as {_chat: unknown})._chat = {className: "Channel", megagroup: true};
+  assert.equal(messageEnvelope(megagroup as unknown as Api.Message).chatType, "supergroup");
+  assert.equal(messageEnvelope(message({post: true})).chatType, "broadcast");
+  assert.equal(messageEnvelope(message({post: false})).chatType, "supergroup");
+  assert.equal(messageEnvelope(message({peerId: new Api.PeerUser({userId: returnBigInt(LARGE)})})).chatType, "private");
+  assert.equal(messageEnvelope(message({peerId: new Api.PeerChat({chatId: returnBigInt(LARGE)})})).chatType, "group");
 });

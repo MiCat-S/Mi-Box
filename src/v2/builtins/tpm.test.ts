@@ -88,9 +88,16 @@ test("TPM help entries share detailed bounded guidance without running plugin op
     for (const heading of ["查看插件与帮助", "安装插件", "更新插件", "卸载插件", "参数与操作说明", "常见提示"]) {
       assert.ok(output.includes(heading), `${input} must include ${heading}`);
     }
-    for (const args of ["search [关键词]", "list", "install 插件名", "install all", "update 插件名", "update all", "remove 插件名", "remove all", "i nezha", "rm nezha"]) {
+    for (const args of ["search [关键词]", "list", "install 插件名", "install all", "update 插件名", "update all", "remove 插件名", "remove all", "i nezha", "rm nezha", "help"]) {
       assert.ok(output.includes(`${prefix}tpm ${args}`), `${input} must retain ${args} and the active prefix`);
     }
+    // Every all-variant keeps its own accurate semantics instead of reusing the single-target text.
+    assert.ok(output.includes("安装仓库中全部可用扩展，跳过已加载插件和默认模块。"), `${input}: install all semantics`);
+    assert.ok(output.includes("更新全部已安装扩展；需要补装仓库中的其他插件时，使用 install all。"), `${input}: update all semantics`);
+    assert.ok(output.includes("卸载全部已安装扩展，保留各插件配置数据；默认模块继续由程序管理。"), `${input}: remove all semantics`);
+    assert.match(output, /查看完整帮助；直接发送 tpm，或使用 h、--help 也可查看。/);
+    assert.ok(output.includes(`${prefix}tpm i nezha`), `${input}: alias example stays a valid root command`);
+    assert.equal(output.includes(`${prefix}tpm install i nezha`), false, `${input}: focus must not double-prepend the subcommand`);
     assert.match(output, /保留插件配置数据/);
     assert.match(output, /Mi-Box-Plugins/);
     assert.equal(snapshots, 0, "help must not read or alter installed state");
@@ -101,6 +108,18 @@ test("TPM help entries share detailed bounded guidance without running plugin op
   assert.equal(snapshots, 1);
   assert.match(sent.join("\n"), /nezha/);
   assert.doesNotMatch(sent.join("\n"), /参数与操作说明/);
+  // Declared subcommand help is served by both entries without touching state.
+  for (const input of ["tpm install --help", "help tpm install"]) {
+    sent.length = 0;
+    assert.equal(await host.dispatchPrimary({id: 3, chatId: "1", senderId: "1", outgoing: true, text: prefix + input}), true);
+    const output = sent.map(page => HTMLParser.parse(page)[0]).join("\n");
+    assert.ok(output.includes(`${prefix}tpm install 插件名`), input);
+    assert.ok(output.includes("安装仓库中全部可用扩展，跳过已加载插件和默认模块。"), input);
+    assert.ok(output.includes(`${prefix}tpm i nezha`), input);
+    assert.equal(output.includes(`${prefix}tpm install i nezha`), false, input);
+    assert.doesNotMatch(output, /参数与操作说明/, input);
+  }
+  assert.equal(snapshots, 1, "subcommand help must not read installed state");
 });
 
 test("TPM accepts fresh group send-as installs and rejects other channel messages", async () => {
@@ -437,4 +456,60 @@ test("TPM compact lists retain long names across bounded expandable pages", asyn
     return body;
   }).join("\n");
   for (const id of ids) assert.equal(visible.split(id).length - 1, 1);
+});
+
+test("TPM matches Chinese descriptions and case-insensitive names and descriptions", async () => {
+  const f = fixture();
+  f.ctx.processes.run = async () => ({stdout: Buffer.from(JSON.stringify({
+    ids: ["weather", "git_PR", "dig", "constructor", "ai", "gt"],
+    descriptions: {dig: "DNS 记录查询", git_PR: "GitHub 拉取请求", weather: "天气", ai: "DNS 默认模块"},
+    descriptionsAvailable: true,
+  }))});
+  for (const [query, expected] of [["记录", "dig — DNS 记录查询"], ["dns", "dig — DNS 记录查询"], ["GIT_pr", "git_PR — GitHub 拉取请求"]]) {
+    f.edits.length = 0;
+    await f.run(["search", query]);
+    const output = f.edits.slice(1).map(page => HTMLParser.parse(page)[0]).join("\n");
+    assert.ok(output.includes(expected));
+    assert.doesNotMatch(output, /默认模块|weather —/);
+  }
+  f.edits.length = 0;
+  await f.run(["search"]);
+  const output = f.edits.slice(1).map(page => HTMLParser.parse(page)[0]).join("\n");
+  assert.match(output, /constructor — 暂无描述/);
+  assert.ok(output.indexOf("constructor —") < output.indexOf("dig —"));
+  assert.ok(output.indexOf("dig —") < output.indexOf("git_PR —"));
+  assert.ok(output.indexOf("git_PR —") < output.indexOf("weather —"));
+});
+
+test("TPM retains name matches and conflict warnings when descriptions are unavailable", async () => {
+  const f = fixture();
+  f.ctx.processes.run = async () => ({stdout: Buffer.from(JSON.stringify({
+    ids: ["GIT_pr", "git_PR", "dig"], descriptions: {}, descriptionsAvailable: false,
+    collisions: [["GIT_pr", "git_PR"]],
+  }))});
+  await f.run(["search", "git"]);
+  const output = f.edits.slice(1).map(page => HTMLParser.parse(page)[0]).join("\n");
+  assert.match(output, /GIT_pr — 暂无描述/);
+  assert.match(output, /git_PR — 暂无描述/);
+  assert.match(output, /描述索引不可用，当前仅按名称搜索/);
+  assert.match(output, /仓库存在大小写冲突组/);
+  assert.doesNotMatch(output, /dig —/);
+});
+
+test("TPM renders every description in bounded escaped pages", async () => {
+  const f = fixture();
+  const ids = Array.from({length: 160}, (_, i) => `plugin_${String(i).padStart(3, "0")}`);
+  const descriptions = Object.fromEntries(ids.map(id => [id, `<b>${id}</b> & ${"描述".repeat(60)}`]));
+  f.ctx.processes.run = async () => ({stdout: Buffer.from(JSON.stringify({ids: [...ids].reverse(), descriptions, descriptionsAvailable: true}))});
+  await f.run(["search"]);
+  const pages = f.edits.slice(1);
+  assert.ok(pages.length > 1);
+  const output = pages.map((page, i) => {
+    const [plain, entities] = HTMLParser.parse(page);
+    assert.ok(plain.length <= 4096);
+    assert.ok(entities.length <= 100);
+    assert.ok(plain.endsWith(`${i + 1}/${pages.length} 页`));
+    return plain;
+  }).join("\n");
+  for (const id of ids) assert.ok(output.includes(`${id} — ${descriptions[id]}`), id);
 });

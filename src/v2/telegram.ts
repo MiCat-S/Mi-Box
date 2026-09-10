@@ -2,6 +2,7 @@ import type { Api, TelegramClient } from "teleproto";
 import type { EntityLike } from "teleproto/define";
 import type { NewMessageEvent } from "teleproto/events/NewMessage";
 import type { MessageEnvelope, MessageOptions, TelegramPort } from "./sdk";
+import type { ChatType } from "./commands";
 import { ResourceScope } from "./lifecycle";
 
 export interface EnvelopeOptions {
@@ -43,6 +44,60 @@ function replyHeader(message: Api.Message): Api.MessageReplyHeader | undefined {
   return header?.className === "MessageReplyHeader" ? header : undefined;
 }
 
+const CONFLICT = "conflict" as const;
+type EntityChatType = ChatType | typeof CONFLICT | undefined;
+
+/**
+ * Classify a channel/group entity that is already attached to the message.
+ * `message.chat` is the synchronous `_chat` getter; `getChat()` would network
+ * and is deliberately never called here. Explicit `broadcast`/`megagroup`
+ * flags are the only entity evidence used; mutually exclusive flags report a
+ * conflict instead of no evidence.
+ */
+function entityChatType(entity: unknown): EntityChatType {
+  if (!entity || typeof entity !== "object") return undefined;
+  const className = (entity as {className?: unknown}).className;
+  if (className === "Channel") {
+    const broadcast = (entity as {broadcast?: unknown}).broadcast;
+    const megagroup = (entity as {megagroup?: unknown}).megagroup;
+    if (broadcast === true && megagroup === true) return CONFLICT;
+    if (broadcast === true) return "broadcast";
+    if (broadcast === false && megagroup !== true) return "supergroup";
+    if (megagroup === true) return "supergroup";
+    return undefined;
+  }
+  if (className === "Chat") return "group";
+  if (className === "User") return "private";
+  return undefined;
+}
+
+const agrees = (entityType: ChatType, post: boolean): boolean =>
+  entityType === "broadcast" ? post : !post;
+
+/**
+ * Classification uses only the explicit peer type, the synchronous attached
+ * entity flags and the wire `post` fact. A contradiction or missing evidence
+ * stays `unknown`, and an entity never overrides an explicit `PeerUser` or
+ * `PeerChat`. No per-message RPC or lookup happens here.
+ */
+export function classifyChatType(message: Api.Message): ChatType {
+  if (message.peerId.className === "PeerUser") return "private";
+  if (message.peerId.className === "PeerChat") return "group";
+  if (message.peerId.className !== "PeerChannel") return "unknown";
+  const post = typeof message.post === "boolean" ? message.post : undefined;
+  const entityType = entityChatType((message as unknown as {chat?: unknown}).chat);
+  if (entityType === CONFLICT) return "unknown";
+  if (entityType === "broadcast" || entityType === "supergroup") {
+    if (post !== undefined && !agrees(entityType, post)) return "unknown";
+    return entityType;
+  }
+  if (entityType !== undefined) return "unknown";
+  // Only genuinely absent entity evidence falls through to the wire post fact.
+  if (post === true) return "broadcast";
+  if (post === false) return "supergroup";
+  return "unknown";
+}
+
 function rawMessage(message: MessageEnvelope): Api.Message | undefined {
   const raw = message.raw;
   return raw !== null && typeof raw === "object" && "className" in raw && raw.className === "Message"
@@ -64,6 +119,8 @@ export function messageEnvelope(message: Api.Message, options: EnvelopeOptions =
     senderId,
     text: message.message ?? "",
     outgoing: Boolean(message.out),
+    direction: message.out ? "outgoing" : "incoming",
+    chatType: classifyChatType(message),
     saved: Boolean(savedPeer) || (options.selfId !== undefined && chatId === options.selfId),
     // Wire decoding uses null for absent optional fields; constructors use undefined.
     edited: options.edited === true || message.editDate != null,

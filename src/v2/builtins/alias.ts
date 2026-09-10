@@ -1,8 +1,9 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { Api } from "teleproto";
 import type { PluginHost } from "../host";
-import { definePlugin, type MessageEnvelope, type PluginContext, type PluginDefinition } from "../sdk";
+import { definePlugin, STRUCTURED_PLUGIN_API_VERSION, type CommandDefinition, type CommandInvocation, type MessageEnvelope, type PluginContext, type PluginDefinition } from "../sdk";
 import type { SqliteConnection } from "../sqlite";
+import { renderCommandHelp } from "../commands";
 
 interface AliasRow { original: string; final: string; }
 interface AliasState {
@@ -68,8 +69,10 @@ async function temporary(context: PluginContext, message: MessageEnvelope, text:
 export function createAlias(host: Pick<PluginHost, "listCommands" | "configuration" | "replaceAliases">): PluginDefinition {
   const states = new WeakMap<PluginContext, AliasState>();
   const prefix = host.configuration().prefixes[0];
-  const setUsage = `参数不足，用法：${prefix}alias set [别名...] [原命令...]`;
-  const delUsage = `参数不足，用法：${prefix}alias del [别名...]`;
+  const setArgs = "[别名...] [原命令...]";
+  const delArgs = "[别名...]";
+  const setUsage = `参数不足，用法：${prefix}alias set ${setArgs}`;
+  const delUsage = `参数不足，用法：${prefix}alias del ${delArgs}`;
 
   function target(tokens: string[]): AliasRow {
     if (tokens.length < 2) throw new AliasInputError(setUsage);
@@ -88,11 +91,91 @@ export function createAlias(host: Pick<PluginHost, "listCommands" | "configurati
     return { original: alias, final: original };
   }
 
+  const operate = async (
+    invocation: CommandInvocation,
+    context: PluginContext,
+    action: "set" | "del" | "list",
+  ): Promise<void> => {
+    const state = states.get(context);
+    if (!state) throw new Error("别名插件尚未初始化");
+    let response: string;
+    try {
+      response = await serialize(state, context, async () => {
+        if (action === "list") {
+          const records = await state.database.read(rows);
+          return records.length ? "重命名列表：\n" + records.map(row => `${row.original} -> ${row.final}`).join("\n")
+            : "当前没有任何别名配置";
+        }
+        const tokens = [...invocation.args];
+        const result = await state.database.transaction(db => {
+          let text: string;
+          if (action === "set") {
+            const entry = target(tokens);
+            db.prepare("DELETE FROM aliases WHERE final = ? AND original <> ?").run(entry.final, entry.original);
+            // UPDATE preserves extension values, including required columns with no default.
+            const updated = db.prepare("UPDATE aliases SET final = ? WHERE original = ?").run(entry.final, entry.original);
+            if (updated.changes === 0) {
+              db.prepare("INSERT INTO aliases (original, final) VALUES (?, ?)").run(entry.original, entry.final);
+            }
+            text = `插件命令重命名成功，${entry.original} -> ${entry.final}`;
+          } else {
+            const alias = tokens.join(" ");
+            if (!alias) throw new AliasInputError(delUsage);
+            const removed = db.prepare("DELETE FROM aliases WHERE original = ?").run(alias).changes > 0;
+            text = removed ? `删除 ${alias} 重命名成功` : `删除 ${alias} 重命名失败，请检查命令是否存在`;
+          }
+          return { records: rows(db), response: text };
+        });
+        context.signal.throwIfAborted();
+        host.replaceAliases(mapping(result.records));
+        return result.response;
+      });
+    } catch (error) {
+      context.signal.throwIfAborted();
+      if (error instanceof AliasInputError) return temporary(context, invocation.message, error.message);
+      context.log.error("alias.storage_failed", { operation: action });
+      return temporary(context, invocation.message, "别名数据库操作失败，请稍后重试");
+    }
+    await edit(context, invocation.message, response);
+  };
+
+  const aliasCommand: CommandDefinition = {
+    description: "设置、删除或列出命令别名",
+    // Subcommand matching stays case-sensitive to preserve the legacy behavior.
+    subcommandsCaseSensitive: true,
+    args: "set|del|ls",
+    subcommands: {
+      set: {
+        args: setArgs,
+        description: "使用别名执行原命令；同一完整目标只保留一个别名",
+        examples: [{ args: "set a b", description: "使用别名 a 执行命令 b" }],
+        handle: (invocation, context) => operate(invocation, context, "set"),
+      },
+      del: {
+        args: delArgs,
+        description: "删除指定别名",
+        examples: [{ args: "del a" }],
+        handle: (invocation, context) => operate(invocation, context, "del"),
+      },
+      ls: {
+        aliases: ["list"],
+        description: "查看所有别名",
+        handle: (invocation, context) => operate(invocation, context, "list"),
+      },
+    },
+    handle: async (invocation, context) => {
+      const sub = invocation.args[0];
+      if (!sub) return edit(context, invocation.message, "不知道你要干什么！");
+      return edit(context, invocation.message, `未知子命令: ${sub}`);
+    },
+  };
+
   return definePlugin({
-    apiVersion: 1,
+    apiVersion: STRUCTURED_PLUGIN_API_VERSION,
     id: "alias",
     description: `插件命令重命名\n<code>${html(prefix)}alias set a b</code> - 使用别名 a 执行 b（同一完整目标只保留一个别名）\n` +
       `<code>${html(prefix)}alias del a</code> - 删除别名\n<code>${html(prefix)}alias ls</code> - 查看所有别名`,
+    renderHelp: helpPrefix => renderCommandHelp("alias", aliasCommand, { prefix: helpPrefix }),
     async setup(context) {
       const state: AliasState = { database: context.storage.sqlite("alias.db"), tail: Promise.resolve() };
       const records = await state.database.transaction(db => {
@@ -103,57 +186,6 @@ export function createAlias(host: Pick<PluginHost, "listCommands" | "configurati
       host.replaceAliases(mapping(records));
       states.set(context, state);
     },
-    commands: {
-      alias: {
-        description: "设置、删除或列出命令别名",
-        async handle(input, context) {
-          const [, sub, ...tokens] = input.message.text.slice(input.prefix.length).trim().split(/\s+/).filter(Boolean);
-          if (!sub) return edit(context, input.message, "不知道你要干什么！");
-          if (!["set", "del", "ls", "list"].includes(sub)) {
-            return edit(context, input.message, `未知子命令: ${sub}`);
-          }
-          const state = states.get(context);
-          if (!state) throw new Error("别名插件尚未初始化");
-          let text: string;
-          try {
-            text = await serialize(state, context, async () => {
-              if (sub === "ls" || sub === "list") {
-                const records = await state.database.read(rows);
-                return records.length ? "重命名列表：\n" + records.map(row => `${row.original} -> ${row.final}`).join("\n")
-                  : "当前没有任何别名配置";
-              }
-              const result = await state.database.transaction(db => {
-                let response: string;
-                if (sub === "set") {
-                  const entry = target(tokens);
-                  db.prepare("DELETE FROM aliases WHERE final = ? AND original <> ?").run(entry.final, entry.original);
-                  // UPDATE preserves extension values, including required columns with no default.
-                  const updated = db.prepare("UPDATE aliases SET final = ? WHERE original = ?").run(entry.final, entry.original);
-                  if (updated.changes === 0) {
-                    db.prepare("INSERT INTO aliases (original, final) VALUES (?, ?)").run(entry.original, entry.final);
-                  }
-                  response = `插件命令重命名成功，${entry.original} -> ${entry.final}`;
-                } else {
-                  const alias = tokens.join(" ");
-                  if (!alias) throw new AliasInputError(delUsage);
-                  const removed = db.prepare("DELETE FROM aliases WHERE original = ?").run(alias).changes > 0;
-                  response = removed ? `删除 ${alias} 重命名成功` : `删除 ${alias} 重命名失败，请检查命令是否存在`;
-                }
-                return { records: rows(db), response };
-              });
-              context.signal.throwIfAborted();
-              host.replaceAliases(mapping(result.records));
-              return result.response;
-            });
-          } catch (error) {
-            context.signal.throwIfAborted();
-            if (error instanceof AliasInputError) return temporary(context, input.message, error.message);
-            context.log.error("alias.storage_failed", { operation: sub });
-            return temporary(context, input.message, "别名数据库操作失败，请稍后重试");
-          }
-          await edit(context, input.message, text);
-        },
-      },
-    },
+    commands: { alias: aliasCommand },
   });
 }
