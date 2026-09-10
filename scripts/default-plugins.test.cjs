@@ -1,8 +1,24 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
+test('Core and extensions share an id only for passive compatibility packages', () => {
+  const {pluginIds} = require('./test-v2-plugins.cjs');
+  const {buildPlugin} = require('./build-v2-plugin.cjs');
+  const preferred = path.resolve(root, '../mibot-plugins');
+  const plugins = fs.existsSync(preferred) ? preferred : path.resolve(root, '../TeleBox-Plugins');
+  for (const id of pluginIds(plugins)) {
+    if (!fs.existsSync(path.join(root, 'src/v2/builtins', `${id}.ts`))) continue;
+    const {artifactDir} = buildPlugin({id, packageRoot: path.join(plugins, id), entry: 'v2.ts'});
+    const definition = require(path.join(artifactDir, 'index.cjs')).default();
+    assert.deepEqual(Object.keys(definition.commands), [], `${id}: commands must have one implementation owner`);
+    assert.equal(definition.listeners?.length ?? 0, 0, `${id}: listeners must have one implementation owner`);
+    for (const key of ['jobs', 'services']) assert.deepEqual(Object.keys(definition[key] ?? {}), [], `${id}: ${key} must have one implementation owner`);
+    for (const key of ['setup', 'cleanup', 'settings']) assert.equal(definition[key], undefined, `${id}: compatibility package must be passive`);
+  }
+});
 test('packaging and runtime agree on the two default repository plugins', () => {
   const {DAILY_PLUGINS} = require('./package-v2-daily.cjs');
   const runtime = require('../dist/v2/runtime.js');

@@ -7,8 +7,6 @@ import {PluginHost} from "../host";
 import {HTMLParser} from "teleproto/extensions/html.js";
 import createMemory from "./memory";
 import createSudo from "./sudo";
-import createSure from "./sure";
-import createLeech from "./leech";
 import createVersion from "./version";
 import createPing from "./ping";
 import createPrivacy from "./privacy";
@@ -84,65 +82,6 @@ test("sudo standard subcommands preserve owner boundary and listing", async t =>
   assert.match(f.visible(), /高级命令用户白名单/);
 });
 
-test("sure tree keeps case-sensitive scopes, empty-value fallbacks and incoming-only listener", async t => {
-  const original = process.env.TB_OWNER_ID;
-  process.env.TB_OWNER_ID = "1";
-  t.after(() => {if (original === undefined) delete process.env.TB_OWNER_ID; else process.env.TB_OWNER_ID = original;});
-  const sent: unknown[] = [];
-  const f = await fixture(t, {async withClient(operation, signal) {
-    return operation({async sendMessage(_peer: unknown, options: unknown) {sent.push(options);}} as never, signal);
-  }});
-  await f.host.load(createSure());
-  const config = () => fs.readFile(path.join(f.root, "sure", "config.json"), "utf8").then(JSON.parse);
-  await f.send(".sure user add 456");
-  assert.match(f.edits.at(-1)!, /sure user 已添加/);
-  assert.deepEqual((await config()).users, ["456"]);
-  await f.send(".sure chat add 789");
-  await f.send(".sure msg add hello world");
-  assert.deepEqual((await config()).messages, {hello: "hello"}, "message rule stores only the first word");
-  // Case-sensitive scopes/actions and missing values keep the legacy usage without writing.
-  const before = await config();
-  await f.send(".sure USER add 123");
-  assert.match(f.edits.at(-1)!, /sure user\|chat\|msg add\|del/);
-  await f.send(".sure user ADD 123");
-  assert.match(f.edits.at(-1)!, /sure user\|chat add\|del ID/);
-  await f.send(".sure msg add");
-  assert.match(f.edits.at(-1)!, /sure user\|chat\|msg add\|del/);
-  await f.send(".sure user add abc");
-  assert.match(f.edits.at(-1)!, /sure user\|chat add\|del ID/);
-  await f.send(".sure unknown add 1");
-  assert.match(f.edits.at(-1)!, /sure user\|chat\|msg add\|del/);
-  assert.deepEqual(await config(), before, "invalid inputs must not write");
-  await f.send(".sure ls");
-  assert.match(f.edits.at(-1)!, /用户：1/);
-  f.edits.length = 0;
-  await f.send(".sure user add 42", {senderId: "2"});
-  assert.match(f.edits.at(-1)!, /只有 owner 可以管理 sure 白名单/);
-  assert.deepEqual((await config()).users, ["456"]);
-  // Listener direction: outgoing is filtered before the handler, incoming is served.
-  await f.host.dispatchListeners({id: 2, chatId: "789", senderId: "456", outgoing: true, text: "hello", raw: {peerId: "peer"}});
-  assert.deepEqual(sent, []);
-  await f.host.dispatchListeners({id: 3, chatId: "789", senderId: "456", outgoing: false, text: "hello", raw: {peerId: "peer"}});
-  assert.deepEqual(sent, [{message: "hello"}]);
-});
-
-test("leech standard subcommands report status, database and statistics", async t => {
-  const f = await fixture(t, {async withClient(operation, signal) {
-    return operation({async getMe() {return {id: 99n};}} as never, signal);
-  }});
-  await fs.mkdir(path.join(f.root, "leech"));
-  await f.host.load(createLeech());
-  await f.send(".leech help");
-  assert.match(f.visible(), /leech session/);
-  assert.match(f.visible(), /历史抓取功能正在迁移中/);
-  await f.send(".leech db");
-  assert.match(f.edits.at(-1)!, /assets\/leech\.sqlite/);
-  await f.send(".leech session");
-  assert.match(f.edits.at(-1)!, /Telegram 会话正常/);
-  await f.send(".leech bogus");
-  assert.match(f.edits.at(-1)!, /未知子命令/);
-});
-
 test("version keeps its PID detail while ver omits it and both share generated help", async t => {
   const f = await fixture(t);
   await f.host.load(createVersion(f.root));
@@ -199,35 +138,20 @@ test("privacy keeps case-sensitive syntax and rejects malformed hide/mask withou
   assert.equal(JSON.stringify(getIpPrivacy()), owned, "denied owners/forwards must not change state");
 });
 
-test("nested examples expand relative to the parent path and stay executable", async t => {
-  const original = process.env.TB_OWNER_ID;
-  process.env.TB_OWNER_ID = "1";
-  t.after(() => {if (original === undefined) delete process.env.TB_OWNER_ID; else process.env.TB_OWNER_ID = original;});
-  const sure = createSure().commands.sure;
+test("privacy examples expand relative to the parent path and stay executable", async t => {
+  const original = getIpPrivacy();
+  t.after(() => setIpPrivacy(original));
   const privacy = createPrivacy("1").commands.privacy;
-  const rootSure = renderCommandHelp("sure", sure, {prefix: "."});
-  assert.match(rootSure, /\.sure user add 123456789/);
-  assert.match(rootSure, /\.sure chat del 123456789/);
-  assert.match(rootSure, /\.sure msg add hello/);
-  assert.doesNotMatch(rootSure, /\.sure user user|\.sure chat chat|\.sure msg msg/);
-  const focusedSure = renderCommandHelp("sure", sure, {prefix: ".", path: ["user", "add"]});
-  assert.match(focusedSure, /\.sure user add 123456789/);
-  assert.doesNotMatch(focusedSure, /\.sure user user/);
-  const rootPrivacy = renderCommandHelp("privacy", privacy, {prefix: "."});
-  assert.match(rootPrivacy, /\.privacy ip mask 2 4/);
-  assert.doesNotMatch(rootPrivacy, /\.privacy ip ip/);
-  const focusedPrivacy = renderCommandHelp("privacy", privacy, {prefix: ".", path: ["ip", "mask"]});
-  assert.match(focusedPrivacy, /\.privacy ip mask 2 4/);
-  assert.doesNotMatch(focusedPrivacy, /\.privacy ip ip/);
-  // The rendered examples are valid business inputs, not just markers.
+  const root = renderCommandHelp("privacy", privacy, {prefix: "."});
+  assert.match(root, /\.privacy ip mask 2 4/);
+  assert.doesNotMatch(root, /\.privacy ip ip/);
+  const focused = renderCommandHelp("privacy", privacy, {prefix: ".", path: ["ip", "mask"]});
+  assert.match(focused, /\.privacy ip mask 2 4/);
+  assert.doesNotMatch(focused, /\.privacy ip ip/);
   const f = await fixture(t);
-  await f.host.load(createSure());
-  await f.send(".sure user add 123456789");
-  assert.match(f.edits.at(-1)!, /sure user 已添加/);
-  await f.send(".sure msg add hello");
-  assert.match(f.edits.at(-1)!, /sure 消息规则已添加/);
-  await f.send(".sure ls");
-  assert.match(f.edits.at(-1)!, /用户：1/);
+  await f.host.load(createPrivacy("1"));
+  await f.send(".privacy ip mask 2 4");
+  assert.match(f.edits.at(-1)!, /IPv4末尾2段、IPv6末尾4段打码/);
 });
 
 test("help name help entries are read-only while name set/reset keep their boundary", async t => {

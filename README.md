@@ -64,6 +64,8 @@ TPM 仅允许账号所有者管理扩展。安装和更新从配套插件仓库�
 - 测试：`npm run test:v2`，需要 Node 24 和同级插件仓库
 - 离线检查：`npm run check:v2`，不会登录 Telegram
 
+每个 V2 插件只有一处业务实现：默认内置由 `src/v2/builtins` 维护，按需安装的扩展由插件仓库维护。`leech`、`re`、`sure` 使用扩展实现；`ai`、`gt` 从插件仓库默认打包。历史兼容包可保留插件身份和说明，业务命令、监听器及生命周期操作由所属实现提供。全量测试会检查跨仓库同名实现的归属。
+
 `config.json`、`.env`、`assets/` 含账号和插件数据，不得公开上传。
 服务管理见 [运维说明](deploy/systemd/README.md)，许可证见 [LICENSE](LICENSE)。
 
