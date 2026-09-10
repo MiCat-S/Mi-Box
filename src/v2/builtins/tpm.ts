@@ -4,7 +4,7 @@ import {definePlugin, type PluginContext} from "../sdk";
 import type {PluginHost} from "../host";
 import type {PluginReleases} from "../releases";
 import {isOwnerOrGroupSendAs} from "../permissions";
-import {code, command, concat, text, type Html} from "../ui/text";
+import {bold, code, command, concat, link, text, type Html} from "../ui/text";
 import {PAGE_LABEL_RESERVE, pageLabel, renderDocument, richText, section} from "../ui/document";
 import {renderFeedback} from "../ui/feedback";
 import {isPluginId, resolvePluginId} from "../plugin-id";
@@ -65,6 +65,50 @@ async function listView(
   return output.map((page, index) => page + pageLabel(index, output.length));
 }
 
+function renderTpmHelp(prefix: string): Html {
+  const heading = (label: string) => concat(text("\n"), bold(label), text("\n"));
+  const usage = (args: string, description: string) => concat(
+    text("• "), command(prefix, "tpm", args), text(` — ${description}\n`),
+  );
+  return concat(
+    bold(`📦 ${getBotName()} 插件管理器（TPM）`),
+    text("\n搜索、安装、更新和卸载扩展插件，完成后即可使用。\n"),
+    heading("🔍 查看插件与帮助"),
+    usage("search [关键词]", "查看仓库中的可安装插件；省略关键词显示全部，按名称筛选时忽略大小写。简写：s。"),
+    usage("list", "查看当前已加载的扩展插件。简写：ls。默认模块由程序管理，单独随应用更新。"),
+    usage("help", "查看完整帮助；直接发送 tpm，或使用 h、--help 也可查看。"),
+    text("• "), command(prefix, "help", "插件名"), text(" — 查看某个已加载插件的说明与命令，例如 "),
+    command(prefix, "help", "nezha"), text("。\n"),
+    heading("⬇️ 安装插件"),
+    usage("install 插件名", "安装并加载指定扩展。简写：i。对已安装的插件再次执行会更新它。"),
+    usage("install all", "安装仓库中全部可用扩展，跳过已加载插件和默认模块。"),
+    text("示例："), command(prefix, "tpm", "i nezha"), text("；安装后用 "),
+    command(prefix, "help", "nezha"), text(" 查看配置和使用方法。\n"),
+    heading("🔄 更新插件"),
+    usage("update 插件名", "获取并加载指定扩展的最新版本；目标尚未安装时会安装该扩展。"),
+    usage("update all", "更新全部已安装扩展；需要补装仓库中的其他插件时，使用 install all。"),
+    text("示例："), command(prefix, "tpm", "update nezha"), text("。更新后继续使用原有配置。\n"),
+    heading("🗑️ 卸载插件"),
+    usage("remove 插件名", "卸载指定扩展，保留插件配置数据。简写：rm。"),
+    usage("remove all", "卸载全部已安装扩展，保留各插件配置数据；默认模块继续由程序管理。"),
+    text("示例："), command(prefix, "tpm", "rm nezha"), text("。重新安装后可继续使用保留的配置。\n"),
+    heading("📝 参数与操作说明"),
+    text("• 单项操作每次填写一个插件名；全部操作使用小写 all。[关键词] 表示可选参数，输入时省略方括号。\n"),
+    text("• 插件名为 1–64 位字母、数字、下划线或连字符，以字母或数字开头；可直接复制搜索结果中的名称。\n"),
+    text("• 名称优先精确匹配，其次忽略大小写匹配。例如 git_pr 可匹配 git_PR，配置仍使用声明名称。出现大小写冲突时，复制提示中的完整名称执行单项操作。\n"),
+    text("• 安装、更新、卸载及仓库搜索由账号本人操作；支持本账号在群内以频道身份发出的新命令。\n"),
+    text("• 同时只运行一个插件管理任务。批量操作逐项执行，单个插件失败后继续处理其余插件，最后汇总成功、跳过和失败项。\n"),
+    text("• 批量下载或构建整体失败时，请检查仓库连接后重试；个别插件失败时，可按结果中的名称单独重试。长列表会分多条消息显示。\n"),
+    heading("💡 常见提示"),
+    text("• 未找到插件：先用 "), command(prefix, "tpm", "search 关键词"), text(" 核对名称；卸载前用 "),
+    command(prefix, "tpm", "list"), text(" 查看已安装列表。\n"),
+    text("• 默认模块：随应用一起维护，使用应用更新功能获取新版。\n"),
+    text("• 任务正在执行：等待当前操作结束，再提交下一条管理命令。\n"),
+    text("• 操作失败：根据提示中的失败阶段、错误码和下一步建议排查；批量结果会列出失败插件。\n"),
+    text("\n插件来源："), link("https://github.com/MiCat-S/Mi-Box-Plugins", "Mi-Box-Plugins"), text(" 的 main 分支。"),
+  );
+}
+
 export default function createTpm(host: PluginHost, releases: PluginReleases, root: string, ownerId: string) {
   let busy = false;
   const repository = async (ctx: PluginContext, action: string, ...ids: string[]) => {
@@ -73,18 +117,8 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     return JSON.parse(result.stdout.toString("utf8")) as {ids?: string[]; collisions?: string[][]; id?: string; revision?: string; error?: string; candidates?: Candidate[]};
   };
   return definePlugin({apiVersion: 1, id: "tpm", description: "安装、卸载和更新 V2 扩展插件",
-    renderHelp: prefix => concat(
-      text("管理 V2 扩展插件\n"),
-      command(prefix, "tpm", "search [关键词]"), text(" · 搜索扩展\n"),
-      command(prefix, "tpm", "install 插件名"), text(" · 安装一个扩展\n"),
-      command(prefix, "tpm", "install all"), text(" · 安装全部可用扩展，跳过已加载和默认模块\n"),
-      command(prefix, "tpm", "list"), text(" · 查看已安装扩展\n"),
-      command(prefix, "tpm", "update 插件名"), text(" · 更新扩展\n"),
-      command(prefix, "tpm", "update all"), text(" · 更新全部已安装扩展\n"),
-      command(prefix, "tpm", "remove all"), text(" · 卸载全部已安装扩展并保留配置\n"),
-      command(prefix, "tpm", "remove 插件名"), text(" · 卸载扩展并保留配置\n批量操作会继续处理失败后的插件，并汇总结果。"),
-    ),
-    commands: {tpm: {description: "管理插件仓库中的 V2 扩展", ignoreEdited: true, async handle(invocation, ctx) {
+    renderHelp: renderTpmHelp,
+    commands: {tpm: {description: "管理插件仓库中的 V2 扩展", helpOnEmpty: true, helpArgs: ["help", "h"], ignoreEdited: true, async handle(invocation, ctx) {
       const [raw = "list", id] = invocation.args;
       const sub = raw.toLowerCase();
       if (sub === "list" || sub === "ls") {

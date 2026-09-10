@@ -6,6 +6,7 @@ import {Api} from "teleproto";
 import {returnBigInt} from "teleproto/Helpers";
 import {messageEnvelope} from "../telegram";
 import createTpm from "./tpm";
+import {createHelp} from "./help";
 import {PluginHost} from "../host";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -52,6 +53,55 @@ function channelMessage(options: Partial<ConstructorParameters<typeof Api.Messag
     out: true, message: ".tpm install dig", ...options,
   }), {selfId: "1"});
 }
+
+test("TPM help entries share detailed bounded guidance without running plugin operations", async t => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "mibot-tpm-help-")));
+  const prefix = "<&";
+  const sent: string[] = [];
+  const errors: unknown[] = [];
+  let snapshots = 0;
+  const host = new PluginHost({storageRoot: root, prefixes: [prefix],
+    logger: {info() {}, error: (...args) => {errors.push(args);}},
+    telegram: {
+      async edit(_message, value) {sent.push(value);}, async reply(_message, value) {sent.push(value);},
+      async invoke() {assert.fail("help must not invoke Telegram RPC");}, async getReply() {return undefined;},
+      async withClient() {assert.fail("help must not access the Telegram client");},
+    },
+  });
+  t.after(async () => {await host.shutdown(1000); await fs.rm(root, {recursive: true, force: true});});
+  const releases = {
+    snapshot: () => {snapshots++; return {generations: [{id: "nezha", state: "active"}]};},
+    async activate() {assert.fail("help must not install plugins");},
+    async remove() {assert.fail("help must not remove plugins");},
+  } as unknown as PluginReleases;
+  await host.load(createTpm(host, releases, root, "1"));
+  await host.load(createHelp(host, "1"));
+  for (const input of ["tpm", "tpm help", "tpm h", "tpm --help", "help tpm"]) {
+    sent.length = 0;
+    assert.equal(await host.dispatchPrimary({id: 1, chatId: "1", senderId: "1", outgoing: true, text: prefix + input}), true);
+    const output = sent.map(page => {
+      const [value, entities] = HTMLParser.parse(page);
+      assert.ok(page.length <= 3500, `oversized help page for ${input}`);
+      assert.ok(entities.length <= 90, `too many entities for ${input}`);
+      return value;
+    }).join("\n");
+    for (const heading of ["查看插件与帮助", "安装插件", "更新插件", "卸载插件", "参数与操作说明", "常见提示"]) {
+      assert.ok(output.includes(heading), `${input} must include ${heading}`);
+    }
+    for (const args of ["search [关键词]", "list", "install 插件名", "install all", "update 插件名", "update all", "remove 插件名", "remove all", "i nezha", "rm nezha"]) {
+      assert.ok(output.includes(`${prefix}tpm ${args}`), `${input} must retain ${args} and the active prefix`);
+    }
+    assert.match(output, /保留插件配置数据/);
+    assert.match(output, /Mi-Box-Plugins/);
+    assert.equal(snapshots, 0, "help must not read or alter installed state");
+  }
+  assert.deepEqual(errors, []);
+  sent.length = 0;
+  await host.dispatchPrimary({id: 2, chatId: "1", senderId: "1", outgoing: true, text: prefix + "tpm list"});
+  assert.equal(snapshots, 1);
+  assert.match(sent.join("\n"), /nezha/);
+  assert.doesNotMatch(sent.join("\n"), /参数与操作说明/);
+});
 
 test("TPM accepts fresh group send-as installs and rejects other channel messages", async () => {
   const f = fixture();
