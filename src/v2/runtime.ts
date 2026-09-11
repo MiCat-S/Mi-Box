@@ -139,7 +139,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     await host.load(createLogLevel(logger));
     await host.load(createMemory());
     await host.load(createPing());
-    await host.load(createStatus());
+    await host.load(createStatus(root));
     await host.load(createEnv());
     await host.load(createSysinfo());
     await host.load(createVersion(root));
