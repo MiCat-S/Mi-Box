@@ -19,11 +19,34 @@ test('Core and extensions share an id only for passive compatibility packages', 
     for (const key of ['setup', 'cleanup', 'settings']) assert.equal(definition[key], undefined, `${id}: compatibility package must be passive`);
   }
 });
-test('packaging and runtime agree on the two default repository plugins', () => {
-  const {DAILY_PLUGINS} = require('./package-v2-daily.cjs');
-  const runtime = require('../dist/v2/runtime.js');
-  assert.deepEqual(DAILY_PLUGINS, ['ai', 'gt']);
-  assert.deepEqual(runtime.DAILY_PLUGINS, DAILY_PLUGINS);
+test('a standalone Core checkout builds and checks while preserving installed extensions and account data', t => {
+  const {spawnSync} = require('node:child_process');
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'mibot-standalone-')));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  const project = path.join(base, 'core');
+  fs.mkdirSync(path.join(project, 'scripts'), {recursive: true});
+  for (const name of ['build-v2.cjs', 'render-service.cjs']) fs.copyFileSync(path.join(root, 'scripts', name), path.join(project, 'scripts', name));
+  for (const name of ['package.json', 'tsconfig.v2.json']) fs.copyFileSync(path.join(root, name), path.join(project, name));
+  fs.cpSync(path.join(root, 'src/v2'), path.join(project, 'src/v2'), {recursive: true,
+    filter: source => !source.endsWith('.test.ts')});
+  fs.cpSync(path.join(root, 'deploy/systemd'), path.join(project, 'deploy/systemd'), {recursive: true});
+  fs.symlinkSync(path.join(root, 'node_modules'), path.join(project, 'node_modules'), 'dir');
+  const preserved = ['config.json', 'assets/ai/config.json', 'assets/tpm/releases.json', 'dist/v2-plugins/ai/installed/index.cjs'];
+  for (const name of preserved) {
+    fs.mkdirSync(path.dirname(path.join(project, name)), {recursive: true});
+    fs.writeFileSync(path.join(project, name), 'fixture data');
+  }
+  const build = spawnSync('npm', ['run', 'package:v2'], {cwd: project, encoding: 'utf8',
+    env: {...process.env, PATH: path.dirname(process.execPath) + path.delimiter + process.env.PATH}, timeout: 30000});
+  assert.equal(build.status, 0, build.stderr);
+  const check = spawnSync(process.execPath, ['dist/v2/index.js', '--check'], {cwd: project, encoding: 'utf8', timeout: 15000});
+  assert.equal(check.status, 0, check.stderr);
+  assert.equal(JSON.parse(check.stdout).result, 'ok');
+  const units = spawnSync(process.execPath, ['scripts/render-service.cjs', 'temp/systemd'], {cwd: project, encoding: 'utf8'});
+  assert.equal(units.status, 0, units.stderr);
+  assert.equal(fs.existsSync(path.join(project, 'dist/v2-plugins-active')), false);
+  assert.deepEqual(fs.readdirSync(base), ['core']);
+  for (const name of preserved) assert.equal(fs.readFileSync(path.join(project, name), 'utf8'), 'fixture data', name);
 });
 test('runtime loads only the requested default builtins', async () => {
   const [{API}, ts] = await Promise.all([

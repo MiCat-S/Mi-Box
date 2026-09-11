@@ -2,7 +2,6 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const {resolvePluginRoot} = require('./package-v2-daily.cjs');
 
 function quote(value) {
   if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Service paths must not contain control characters');
@@ -12,8 +11,8 @@ function quote(value) {
 // Exec arguments expand dollars independently of unit-file quoting.
 const argument = value => quote(value.replace(/\$/g, () => '$$'));
 
-function renderUnits({root, node, plugins, searchPath = process.env.PATH || '', bash = '/bin/bash'}) {
-  for (const value of [root, node, plugins, bash]) {
+function renderUnits({root, node, searchPath = process.env.PATH || '', bash = '/bin/bash'}) {
+  for (const value of [root, node, bash]) {
     if (!path.isAbsolute(value)) throw new Error('Service paths must be absolute');
     if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Service paths must not contain control characters');
   }
@@ -23,7 +22,7 @@ function renderUnits({root, node, plugins, searchPath = process.env.PATH || '', 
     // WorkingDirectory takes a literal path, unlike the quoted Exec/Environment fields.
     ROOT: root.replace(/%/g, '%%') + '/', NODE: quote(node), RUNTIME: argument(path.join(root, 'dist/v2/index.js')),
     BASH: quote(bash), UPDATE_SCRIPT: argument(path.join(root, 'scripts/update-service.sh')),
-    PATH: quote(`PATH=${commandPath}`), PLUGINS: quote(`MIBOT_PLUGINS_DIR=${plugins}`),
+    PATH: quote(`PATH=${commandPath}`),
   };
   return Object.fromEntries(['mibot.service', 'mibot-update.service'].map(name => {
     const template = fs.readFileSync(path.join(__dirname, '../deploy/systemd', name), 'utf8');
@@ -38,23 +37,21 @@ function renderUnits({root, node, plugins, searchPath = process.env.PATH || '', 
 if (require.main === module) {
   try {
     const args = process.argv.slice(2);
-    const usage = 'Usage: node scripts/render-service.cjs OUTPUT_DIRECTORY [--root DIRECTORY] [--plugins DIRECTORY]';
+    const usage = 'Usage: node scripts/render-service.cjs OUTPUT_DIRECTORY [--root DIRECTORY]';
     if (args.length === 1 && args[0] === '--help') { console.log(usage); process.exit(0); }
     const output = args.shift();
     if (!output || output.startsWith('--')) throw new Error(usage);
     let project = path.resolve(__dirname, '..');
-    let plugins;
     while (args.length) {
       const option = args.shift();
-      if (!['--root', '--plugins'].includes(option)) throw new Error(`Unsupported argument: ${option}\n${usage}`);
+      if (option !== '--root') throw new Error(`Unsupported argument: ${option}\n${usage}`);
       const value = args.shift();
       if (!value || value.startsWith('--')) throw new Error(`Missing value for ${option}`);
-      if (option === '--root') project = value;
-      else plugins = value;
+      project = value;
     }
     if (process.versions.node.split('.')[0] !== '24') throw new Error('Node 24 required');
     const root = fs.realpathSync(project);
-    const units = renderUnits({root, node: process.execPath, plugins: resolvePluginRoot(root, plugins)});
+    const units = renderUnits({root, node: process.execPath});
     fs.mkdirSync(output, {recursive: true});
     for (const [name, content] of Object.entries(units)) fs.writeFileSync(path.join(output, name), content, {mode: 0o600});
   } catch (error) {console.error(error.message); process.exitCode = 1;}

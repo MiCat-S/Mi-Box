@@ -22,7 +22,7 @@ test("agent submits text to the AI chat service and displays its string answer",
   await host.load(createAgent());
   const send = (text: string) => host.dispatchPrimary({id: 1, chatId: "1", senderId: "1", outgoing: true, text});
   await send(".agent 你好");
-  assert.equal(output.at(-1), "AI 服务当前不可用");
+  assert.equal(output.at(-1), "AI 服务当前不可用，请先用 .tpm install ai 安装，再用 .help ai 配置");
   await host.load(definePlugin({apiVersion: 1, id: "ai", description: "AI 服务", commands: {}, services: {
     chat: {description: "AI 文字对话", async handle(input) {requests.push(input); return answer;}},
   }}));

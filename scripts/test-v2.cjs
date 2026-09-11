@@ -16,7 +16,6 @@ function run(args) {
 const tsc = path.join(root, 'node_modules/typescript/bin/tsc');
 run([tsc, '-p', 'tsconfig.v2.json']);
 run([tsc, '-p', path.join(plugins, 'tsconfig.v2.json')]);
-run([path.join(__dirname, 'package-v2-daily.cjs')]);
 run([path.join(__dirname, 'build-v2.cjs'), '--test']);
 const tests = [];
 function visit(directory) {

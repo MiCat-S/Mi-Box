@@ -20,8 +20,8 @@ function fixture() {
   const failures: unknown[] = [];
   const generations: {id: string; state: string}[] = [];
   const host = {
-    pluginState: (id: string) => ["ai", "gt"].includes(id) || generations.some(g => g.id === id) ? "active" : undefined,
-    listPlugins: () => ["ai", "gt", ...generations.map(g => g.id)].map(id => ({id})),
+    pluginState: (id: string) => ["help", "ping"].includes(id) || generations.some(g => g.id === id) ? "active" : undefined,
+    listPlugins: () => ["help", "ping", ...generations.map(g => g.id)].map(id => ({id})),
   };
   const releases = {snapshot: () => ({generations}), async activate(id: string) {
     operations.push(`activate:${id}`); const existing = generations.find(g => g.id === id);
@@ -32,10 +32,10 @@ function fixture() {
     async reply(_m: unknown, text: string) {edits.push(text);}},
     processes: {async run(_command: string, args: string[]) {
       operations.push(args[1]);
-      return {stdout: Buffer.from(JSON.stringify(args[1] === "search" ? {ids: ["ai", "gt", "dig"]} :
-        args[1] === "build-selected" ? {ids: ["ai", "gt", "dig", "weather"], candidates:
+      return {stdout: Buffer.from(JSON.stringify(args[1] === "search" ? {ids: ["ai", "gt", "help", "ping", "dig"]} :
+        args[1] === "build-selected" ? {ids: ["help", "ping", "dig", "weather"], candidates:
           args.slice(2).map(id => ({id, revision: "a".repeat(64)}))} :
-        args[1] === "build-all" ? {ids: ["ai", "gt", "dig", "weather"], candidates:
+        args[1] === "build-all" ? {ids: ["help", "ping", "dig", "weather"], candidates:
           ["dig", "weather"].filter(id => !args.slice(2).includes(id)).map(id => ({id, revision: "a".repeat(64)}))} :
           {id: args[2], revision: "a".repeat(64)}))};
     }}};
@@ -228,18 +228,39 @@ test("TPM installs and removes an extension, and lists actual loaded selections"
   await f.run(["remove", "dig"]);
   assert.deepEqual(f.operations, ["build", "activate:dig", "remove:dig"]);
 });
+test("TPM manages ai and gt as ordinary extensions in selected and all operations", async () => {
+  const f = fixture();
+  f.ctx.processes.run = async (_exe, args) => {
+    f.operations.push(args[1]);
+    const ids = ['ai', 'gt', 'help', 'ping'];
+    const targets = args[1] === 'build-all' ? ids.filter(id => !args.slice(2).includes(id)) : args.slice(2);
+    return {stdout: Buffer.from(JSON.stringify({ids, candidates: targets.map(id => ({id, revision: 'a'.repeat(64)}))}))};
+  };
+  await f.run(['install', 'all']);
+  assert.deepEqual(f.generations.map(item => item.id).sort(), ['ai', 'gt']);
+  await f.run(['update', 'ai', 'gt']);
+  await f.run(['remove', 'all']);
+  assert.deepEqual(f.generations, []);
+  await f.run(['install', 'ai', 'gt']);
+  assert.deepEqual(f.operations, ['build-all', 'activate:ai', 'activate:gt',
+    'build-selected', 'activate:ai', 'activate:gt', 'remove:ai', 'remove:gt',
+    'build-selected', 'activate:ai', 'activate:gt']);
+});
 test("TPM protects defaults and rejects unprivileged or invalid install requests", async () => {
   const f = fixture();
   await f.run(["install", "dig"], "2");
   await f.run(["install", "../dig"]);
-  await f.run(["remove", "ai"]);
+  await f.run(["remove", "help"]);
   assert.deepEqual(f.operations, []);
 });
-test("TPM searches V2 entries in the plugin repository and excludes defaults", async () => {
+test("TPM search includes AI extensions and excludes loaded builtins", async () => {
   const f = fixture();
   await f.run(["search"]);
   assert.match(f.edits.at(-1)!, /dig/);
-  assert.doesNotMatch(f.edits.at(-1)!, /ai|gt/);
+  const visible = HTMLParser.parse(f.edits.at(-1)!)[0];
+  assert.match(visible, /ai —/);
+  assert.match(visible, /gt —/);
+  assert.doesNotMatch(visible, /help —|ping —/);
 });
 test("TPM reports failure stage and known code without exposing private process errors", async () => {
   const f = fixture();
@@ -461,8 +482,8 @@ test("TPM compact lists retain long names across bounded expandable pages", asyn
 test("TPM matches Chinese descriptions and case-insensitive names and descriptions", async () => {
   const f = fixture();
   f.ctx.processes.run = async () => ({stdout: Buffer.from(JSON.stringify({
-    ids: ["weather", "git_PR", "dig", "constructor", "ai", "gt"],
-    descriptions: {dig: "DNS 记录查询", git_PR: "GitHub 拉取请求", weather: "天气", ai: "DNS 默认模块"},
+    ids: ["weather", "git_PR", "dig", "constructor", "help", "ai", "gt"],
+    descriptions: {dig: "DNS 记录查询", git_PR: "GitHub 拉取请求", weather: "天气", help: "DNS 默认模块"},
     descriptionsAvailable: true,
   }))});
   for (const [query, expected] of [["记录", "dig — DNS 记录查询"], ["dns", "dig — DNS 记录查询"], ["GIT_pr", "git_PR — GitHub 拉取请求"]]) {
@@ -536,7 +557,7 @@ test("TPM selected batches report partial failures and skip default modules", as
       {id: 'dig', revision: 'a'.repeat(64)}, {id: 'weather', error: 'BUILD'}, {id: 'missing', error: 'NOT_FOUND'},
     ]}))};
   };
-  await f.run(['install', 'AI', 'dig', 'missing', 'weather']);
+  await f.run(['install', 'HELP', 'dig', 'missing', 'weather']);
   assert.deepEqual(f.operations, ['activate:dig']);
   const visible = HTMLParser.parse(f.edits.at(-1)!)[0];
   assert.match(visible, /成功 1 · 跳过 1 · 失败 2/);
@@ -549,7 +570,7 @@ test("TPM updates and removes selected plugins, deduplicating canonical names", 
   await f.run(['update', 'dig', 'weather']);
   assert.deepEqual(f.operations, ['build-selected', 'activate:dig', 'activate:weather']);
   f.operations.length = 0;
-  await f.run(['remove', 'dig', 'DIG', 'weather', 'missing', 'ai']);
+  await f.run(['remove', 'dig', 'DIG', 'weather', 'missing', 'help']);
   assert.deepEqual(f.operations, ['remove:dig', 'remove:weather']);
   assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /成功 2 · 跳过 1 · 失败 1/);
 });

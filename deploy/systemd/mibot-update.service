@@ -7,7 +7,6 @@ Type=oneshot
 WorkingDirectory=@ROOT@
 ExecStart=@BASH@ @UPDATE_SCRIPT@
 Environment=@PATH@
-Environment=@PLUGINS@
 User=root
 StandardOutput=journal
 StandardError=journal

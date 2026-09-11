@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {mkdtemp, realpath, rm} from "node:fs/promises";
+import {mkdtemp, realpath, rm, symlink} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {TelegramClient} from "teleproto";
-import {prepareArtifact, type PreparedArtifact} from "./artifacts";
 import {PluginHost} from "./host";
 import type {MessageEnvelope, TelegramPort} from "./sdk";
-import {DAILY_PLUGINS} from "./runtime";
+import {PluginReleases, type ReleaseState} from "./releases";
+import {StorageRoot} from "./storage";
+import createTpm from "./builtins/tpm";
+import {existsSync} from "node:fs";
 
-test("daily artifact set loads defaults and handles offline AI media paths", async () => {
+test("AI extensions install through TPM, handle offline media and restore from saved selections", async () => {
   const root = await realpath(path.resolve(__dirname, "../.."));
-  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "telebox-v2-daily-")));
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "telebox-v2-extensions-")));
+  // Dynamic package imports resolve from the deployment root, as in production.
+  await symlink(path.join(root, 'node_modules'), path.join(directory, 'node_modules'), 'dir');
+  const preferred = path.resolve(root, '../mibot-plugins');
+  const sources = existsSync(preferred) ? preferred : path.resolve(root, '../TeleBox-Plugins');
+  const {buildPlugin} = require(path.join(root, 'scripts/build-v2-plugin.cjs'));
   const output: string[] = [];
   const deleted: number[][] = [];
   const files: string[] = [];
@@ -52,7 +59,7 @@ test("daily artifact set loads defaults and handles offline AI media paths", asy
     async withClient(operation, signal) {return operation(native, signal);},
   };
   const logger = {info() {}, error() {}};
-  const host = new PluginHost({storageRoot: path.join(directory, "assets"), tempRoot: path.join(directory, "temp"), telegram, logger,
+  const hostOptions = {storageRoot: path.join(directory, "assets"), tempRoot: path.join(directory, "temp"), telegram, logger,
     http: {fetch: async (input, init) => {
       const url = String(input);
       if (url.includes("quote-api-enhanced")) return new Response(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), {headers: {"content-type": "image/png"}});
@@ -61,17 +68,29 @@ test("daily artifact set loads defaults and handles offline AI media paths", asy
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       const content = body.model === "fixture-video" ? "https://fixture.invalid/media.mp4" : "<b>fixture answer</b>";
       return new Response(JSON.stringify({choices: [{message: {content}}]}));
-    }}});
-  const prepared: PreparedArtifact[] = [];
+    }}} satisfies ConstructorParameters<typeof PluginHost>[0];
+  let host = new PluginHost(hostOptions);
+  const storage = new StorageRoot(path.join(directory, 'assets'));
+  const selection = storage.json<ReleaseState>('tpm', 'releases.json', {schemaVersion: 1, plugins: {}});
+  let releases = new PluginReleases(host, {artifactRoot: path.join(directory, 'dist/v2-plugins'), store: selection});
   let stopped = false;
   try {
-    for (const id of DAILY_PLUGINS) {
-      const artifact = await prepareArtifact(path.join(root, "dist/v2-plugins-active", id));
-      prepared.push(artifact);
-      await host.load(artifact.create());
-    }
-    assert.deepEqual(host.listPlugins().map(plugin => plugin.id).sort(), [...DAILY_PLUGINS].sort());
-    assert.deepEqual(host.listCommands().map(command => command.name).sort(), [...DAILY_PLUGINS].sort());
+    const tpm = createTpm(host, releases, root, '123');
+    const install = {id: 1, chatId: '123', senderId: '123', text: '.tpm install ai gt', outgoing: true, saved: true};
+    // Compile actual extension sources locally; repository transport is outside this offline test.
+    await tpm.commands.tpm.handle({command: 'tpm', prefix: '.', args: ['install', 'ai', 'gt'], message: install}, {
+      signal: new AbortController().signal, telegram, log: logger,
+      processes: {async run(_exe: string, args: string[]) {
+        assert.equal(args[1], 'build-selected');
+        return {stdout: Buffer.from(JSON.stringify({ids: ['ai', 'gt'], candidates: args.slice(2).map(id => {
+          const {manifest} = buildPlugin({id, packageRoot: path.join(sources, id), entry: 'v2.ts', rootDir: directory});
+          return {id, revision: manifest.revision};
+        })}))};
+      }},
+    } as unknown as import('./sdk').PluginContext);
+    assert.deepEqual(host.listPlugins().map(plugin => plugin.id).sort(), ['ai', 'gt']);
+    assert.deepEqual(Object.keys((await selection.read()).plugins).sort(), ['ai', 'gt']);
+    output.length = 0;
     const message = (text: string, chatId = "-100123"): MessageEnvelope => ({
       id: output.length + 1, chatId, senderId: "123", text, outgoing: true, saved: chatId === "123",
     });
@@ -98,15 +117,31 @@ test("daily artifact set loads defaults and handles offline AI media paths", asy
     assert.equal(await host.dispatchPrimary(saved(".ai model video main fixture-video")), true);
     assert.equal(await host.dispatchPrimary(saved(".ai video fixture clip")), true);
     assert.match(files[1] ?? "", /ai_video_.*\.mp4/);
+    assert.equal((await releases.shutdown(5000)).completed, true);
+    assert.equal((await host.shutdown(5000)).completed, true);
+    host = new PluginHost(hostOptions);
+    releases = new PluginReleases(host, {artifactRoot: path.join(directory, 'dist/v2-plugins'), store: selection});
+    for (const [id, selected] of Object.entries((await selection.read()).plugins)) await releases.activate(id, selected.current);
+    assert.deepEqual(releases.snapshot().generations.map(item => item.id).sort(), ['ai', 'gt']);
+    assert.equal(await host.dispatchPrimary(saved('.ai configuration survives restart')), true);
+    assert.match(output.at(-1) ?? '', /fixture answer/);
+    await releases.remove('gt');
+    assert.equal(await host.dispatchPrimary(saved('.gt en removed')), false);
+    assert.deepEqual(Object.keys((await selection.read()).plugins), ['ai']);
+    const released = await releases.shutdown(5000);
     const report = await host.shutdown(5000);
-    stopped = report.completed;
+    stopped = released.completed && report.completed;
+    assert.equal(released.completed, true);
     assert.equal(report.completed, true);
     assert.equal(report.pendingTasks, 0);
     assert.equal(report.pendingResources, 0);
   } finally {
-    if (!stopped) stopped = (await host.shutdown(5000)).completed;
+    if (!stopped) {
+      const released = await releases.shutdown(5000);
+      stopped = (await host.shutdown(5000)).completed && released.completed;
+    }
+    await storage.close();
     if (stopped) {
-      for (const artifact of prepared.reverse()) artifact.release();
       await rm(directory, {recursive: true, force: true});
     }
   }

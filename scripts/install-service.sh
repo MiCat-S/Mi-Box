@@ -4,11 +4,11 @@ set -euo pipefail
 umask 077
 
 if [[ "${1:-}" == "--help" && $# == 1 ]]; then
-  printf '%s\n' 'Usage: bash scripts/install-service.sh [--root DIRECTORY] [--node PATH] [--plugins DIRECTORY]' \
+  printf '%s\n' 'Usage: bash scripts/install-service.sh [--root DIRECTORY] [--node PATH]' \
     'Requires Linux/systemd, root, Node 24, dependencies and config.json.' \
     'Defaults to the script repository directory; --root selects an existing deployment.' \
     'Uses Node from PATH; --node selects another binary. Relative options use the caller directory.' \
-    'Plugins default to MIBOT_PLUGINS_DIR or sibling mibot-plugins / TeleBox-Plugins.' \
+    'Extensions are installed through TPM after startup.' \
     'Installs and starts mibot. Refuses active or enabled services.'
   exit 0
 fi
@@ -16,12 +16,11 @@ node=$(command -v node || true)
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root|--node|--plugins)
+    --root|--node)
       [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "Missing value for $1" >&2; exit 2; }
       case "$1" in
         --root) root="$2" ;;
         --node) node="$2" ;;
-        --plugins) export MIBOT_PLUGINS_DIR="$2" ;;
       esac
       shift 2 ;;
     *) echo "Unsupported arguments: $1" >&2; exit 2 ;;
@@ -32,10 +31,6 @@ root=$(cd -- "$root" && pwd -P)
 # Resolve caller-relative options before changing to the repository directory.
 [[ -n "$node" && -x "$node" ]] || { echo "Node 24 required; use --node PATH or add it to PATH" >&2; exit 1; }
 node=$("$node" -p 'process.execPath')
-if [[ -n "${MIBOT_PLUGINS_DIR:-}" ]]; then
-  MIBOT_PLUGINS_DIR=$(cd -- "$MIBOT_PLUGINS_DIR" && pwd -P)
-  export MIBOT_PLUGINS_DIR
-fi
 cd "$root"
 export PATH="$(dirname -- "$node"):$PATH"
 for executable in /usr/bin/systemctl /usr/bin/systemd-analyze /usr/bin/flock /usr/bin/journalctl /usr/bin/dig; do
@@ -44,8 +39,6 @@ done
 [[ $("$node" -p 'process.versions.node.split(".")[0]') == 24 ]] || { echo "Node 24 required: $node" >&2; exit 1; }
 [[ -d /run/systemd/system ]] || { echo "systemd must be running" >&2; exit 1; }
 [[ -d node_modules ]] || { echo "Install dependencies first with npm ci" >&2; exit 1; }
-MIBOT_PLUGINS_DIR=$("$node" -e 'console.log(require("./scripts/package-v2-daily.cjs").resolvePluginRoot(process.cwd()))')
-export MIBOT_PLUGINS_DIR
 [[ -f config.json && ! -L config.json ]] || { echo "Run npm run login first; config.json must be a regular file" >&2; exit 1; }
 "$node" - <<'NODE'
 const fs = require('fs');
@@ -88,7 +81,7 @@ backup=$(mktemp -d "$(dirname -- "$root")/mibot-install.XXXXXX")
 "$node" scripts/render-service.cjs "$backup/units"
 /usr/bin/systemd-analyze verify "$backup/units/mibot.service" "$backup/units/mibot-update.service"
 printf 'Backup: %s\n' "$backup"
-for entry in dist/v2 dist/v2-plugins-active; do
+for entry in dist/v2; do
   [[ ! -L "$entry" ]] || { echo "Refusing symlink artifact: $entry" >&2; exit 1; }
   if [[ -d "$entry" ]]; then cp -a "$entry" "$backup/$(basename "$entry")"; fi
 done
@@ -105,7 +98,7 @@ restore() {
   if [[ $result != 0 && "$changed" == true ]]; then
     echo "Installation failed; restoring program and service definition" >&2
     /usr/bin/systemctl disable --now mibot || true
-    for name in v2 v2-plugins-active; do
+    for name in v2; do
       if [[ -e "dist/$name" ]]; then mv "dist/$name" "$backup/failed-$name"; fi
       if [[ -d "$backup/$name" ]]; then cp -a "$backup/$name" "dist/$name"; fi
     done
@@ -118,8 +111,8 @@ restore() {
 }
 trap restore EXIT
 changed=true
-printf '%s\n' 'Building MiBot and plugins...'
-"$node" scripts/package-v2-daily.cjs > "$backup/build.log" 2>&1
+printf '%s\n' 'Building MiBot...'
+"$node" scripts/build-v2.cjs > "$backup/build.log" 2>&1
 "$node" dist/v2/index.js --check > "$backup/check.log" 2>&1
 install -m 644 "$backup/units/mibot.service" "$unit"
 install -m 644 "$backup/units/mibot-update.service" "$update_unit"

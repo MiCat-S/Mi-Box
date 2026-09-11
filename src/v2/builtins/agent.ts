@@ -18,7 +18,7 @@ const agentCommand: CommandDefinition = {
   help: [
     {
       heading: "首次配置：",
-      body: "需要先安装并配置提供聊天服务的 AI 插件。使用 <code>{prefix}help ai</code> 查看 AI 连接与模型配置方法。\n本命令使用 AI 服务当前生效的聊天配置。",
+      body: "先发送 <code>{prefix}tpm install ai</code> 安装 AI 插件，再用 <code>{prefix}help ai</code> 查看连接与模型配置方法。\n本命令使用 AI 服务当前生效的聊天配置。",
     },
     {
       heading: "上下文与结果：",
@@ -39,7 +39,7 @@ const agentCommand: CommandDefinition = {
       return;
     }
     if (!ctx.services.available("ai", "chat")) {
-      await ctx.telegram.edit(invocation.message, "AI 服务当前不可用");
+      await ctx.telegram.edit(invocation.message, `AI 服务当前不可用，请先用 ${invocation.prefix}tpm install ai 安装，再用 ${invocation.prefix}help ai 配置`);
       return;
     }
     const reply = await ctx.telegram.getReply(invocation.message);

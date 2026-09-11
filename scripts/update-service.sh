@@ -65,8 +65,7 @@ main() {
   if [[ "$before" != "$after" || ! -d node_modules ]]; then
     run_step "安装依赖" npm ci
   fi
-  run_step "构建主程序" npm run build:v2
-  run_step "打包插件与运行时" npm run package:v2
+  run_step "构建主程序" npm run package:v2
   run_step "运行运行时自检" npm run check:v2
   run_step "重启主服务" systemctl restart mibot.service
 

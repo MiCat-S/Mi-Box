@@ -8,7 +8,8 @@ test('public commands select the compiled V2 runtime and build chain', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.equal(pkg.scripts.start, 'node dist/v2/index.js --serve');
   assert.equal(pkg.scripts.login, 'node scripts/login-v2.cjs');
-  assert.equal(pkg.scripts.build, 'node scripts/package-v2-daily.cjs');
+  assert.equal(pkg.scripts.build, 'node scripts/build-v2.cjs');
+  assert.equal(pkg.scripts['package:v2'], 'node scripts/build-v2.cjs');
   assert.equal(pkg.scripts.test, 'node scripts/test-v2.cjs');
   for (const command of Object.values(pkg.scripts)) {
     assert.doesNotMatch(command, /run-tsx|src\/index|src\/plugin|pm2/);

@@ -28,8 +28,8 @@ test('public installer command and documented invocation match', () => {
 });
 
 test('installer validates option values before operating on the host', () => {
-  for (const option of ['--root', '--node', '--plugins']) {
-    for (const extra of [[], ['--plugins', '/tmp/plugins']]) {
+  for (const option of ['--root', '--node']) {
+    for (const extra of [[], ['--node', '/tmp/node']]) {
       const result = spawnSync('bash', [script, option, ...extra], {encoding: 'utf8'});
       assert.equal(result.status, 2);
       assert.match(result.stderr, /Missing value/);
@@ -40,44 +40,38 @@ test('installer validates option values before operating on the host', () => {
 test('installer resolves caller-relative paths before entering the selected deployment', t => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-install-')));
   t.after(() => fs.rmSync(base, {recursive: true, force: true}));
-  for (const dir of ['deployed bot', 'custom plugins']) fs.mkdirSync(path.join(base, dir));
+  fs.mkdirSync(path.join(base, 'deployed bot'));
   fs.symlinkSync(path.join(base, 'deployed bot'), path.join(base, 'alias'));
   const source = fs.readFileSync(script, 'utf8');
   // Exercise argument and path handling, stopping before systemd or account operations.
   const setup = source.slice(0, source.indexOf('for executable in '))
     .replace(/^\[\[ \$\(uname -s\).*$/m, '');
-  const result = spawnSync('bash', ['-c', `${setup}\nprintf '%s\\n' "$PWD" "$MIBOT_PLUGINS_DIR" "$node"`,
-    script, '--root', './alias', '--plugins', './custom plugins', '--node', process.execPath], {cwd: base, encoding: 'utf8'});
+  const result = spawnSync('bash', ['-c', `${setup}\nprintf '%s\\n' "$PWD" "$node"`,
+    script, '--root', './alias', '--node', process.execPath], {cwd: base, encoding: 'utf8'});
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(result.stdout.trim().split('\n'), [path.join(base, 'deployed bot'), path.join(base, 'custom plugins'), process.execPath]);
+  assert.deepEqual(result.stdout.trim().split('\n'), [path.join(base, 'deployed bot'), process.execPath]);
 });
 
-test('renderer CLI resolves deployment aliases and plugin options independently of its own repository', t => {
+test('renderer CLI uses the selected deployment without a plugin source checkout', t => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-render-')));
   t.after(() => fs.rmSync(base, {recursive: true, force: true}));
   const root = path.join(base, 'nested', 'deployed bot');
-  const sibling = path.join(base, 'nested', 'mibot-plugins');
-  const custom = path.join(base, 'custom plugins');
-  for (const dir of [root, sibling, custom]) fs.mkdirSync(dir, {recursive: true});
+  fs.mkdirSync(root, {recursive: true});
   fs.symlinkSync(root, path.join(base, 'alias'));
-  for (const plugins of [undefined, './custom plugins']) {
-    const args = [path.join(__dirname, 'render-service.cjs'), './units', '--root', './alias'];
-    if (plugins) args.push('--plugins', plugins);
-    const result = spawnSync(process.execPath, args, {cwd: base, encoding: 'utf8', env: {...process.env, MIBOT_PLUGINS_DIR: ''}});
-    assert.equal(result.status, 0, result.stderr);
-    for (const name of ['mibot.service', 'mibot-update.service']) {
-      const unit = fs.readFileSync(path.join(base, 'units', name), 'utf8');
-      assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
-      assert.ok(unit.includes(`Environment="MIBOT_PLUGINS_DIR=${plugins ? custom : sibling}"`));
-      assert.ok(unit.includes(name === 'mibot.service' ? `${root}/dist/v2/index.js` : `${root}/scripts/update-service.sh`));
-    }
+  const result = spawnSync(process.execPath, [path.join(__dirname, 'render-service.cjs'), './units', '--root', './alias'],
+    {cwd: base, encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  for (const name of ['mibot.service', 'mibot-update.service']) {
+    const unit = fs.readFileSync(path.join(base, 'units', name), 'utf8');
+    assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
+    assert.ok(unit.includes(name === 'mibot.service' ? `${root}/dist/v2/index.js` : `${root}/scripts/update-service.sh`));
   }
 });
 
 test('renderer rejects invalid arguments before writing service files', t => {
   const base = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-invalid-'));
   t.after(() => fs.rmSync(base, {recursive: true, force: true}));
-  for (const args of [['--root'], ['--plugins', '--root', '/tmp'], ['--force']]) {
+  for (const args of [['--root'], ['--root', '--help'], ['--force']]) {
     const output = path.join(base, 'units');
     const result = spawnSync(process.execPath, [path.join(__dirname, 'render-service.cjs'), output, ...args], {encoding: 'utf8'});
     assert.equal(result.status, 1);
@@ -86,13 +80,12 @@ test('renderer rejects invalid arguments before writing service files', t => {
   }
 });
 
-test('service generation shares actual repository, Node and plugin paths across both units', () => {
+test('service generation shares actual repository and Node paths across both units', () => {
   const {renderUnits} = require('./render-service.cjs');
   for (const root of ['/root/mibot/mibot', '/srv/apps/My Bot']) {
-    const units = renderUnits({root, node: '/opt/node24/bin/node', plugins: '/srv/extensions', searchPath: '/opt/npm/bin:/usr/bin'});
+    const units = renderUnits({root, node: '/opt/node24/bin/node', searchPath: '/opt/npm/bin:/usr/bin'});
     for (const unit of Object.values(units)) {
       assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
-      assert.ok(unit.includes('Environment="MIBOT_PLUGINS_DIR=/srv/extensions"'));
       assert.ok(unit.includes('Environment="PATH=/opt/node24/bin:/opt/npm/bin:/usr/bin:'));
       assert.doesNotMatch(unit, /@[A-Z_]+@/);
     }
@@ -104,32 +97,10 @@ test('service generation shares actual repository, Node and plugin paths across 
 test('service generation preserves literal percent, dollar, quotes and spaces in paths', () => {
   const {renderUnits} = require('./render-service.cjs');
   const root = '/srv/50%/bot $name "quoted"';
-  const unit = renderUnits({root, node: '/opt/node/bin/node', plugins: '/srv/plugins $name', searchPath: '/usr/bin'})['mibot.service'];
+  const unit = renderUnits({root, node: '/opt/node/bin/node', searchPath: '/usr/bin'})['mibot.service'];
   assert.ok(unit.includes('WorkingDirectory=/srv/50%%/bot $name "quoted"/\n'));
   assert.ok(unit.includes('"/srv/50%%/bot $$name \\"quoted\\"/dist/v2/index.js"'));
-  assert.ok(unit.includes('Environment="MIBOT_PLUGINS_DIR=/srv/plugins $name"'));
-  assert.throws(() => renderUnits({root: '/srv/bot\nExecStart=/bin/false', node: '/bin/node', plugins: '/srv/plugins'}), /control characters/);
-});
-
-test('packaging resolves explicit, configured and sibling plugin directories', t => {
-  const {resolvePluginRoot} = require('./package-v2-daily.cjs');
-  const base = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-paths-'));
-  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
-  const root = path.join(base, 'nested', 'core');
-  const sibling = path.join(base, 'nested', 'mibot-plugins');
-  const custom = path.join(base, 'custom plugins');
-  for (const directory of [root, sibling, custom]) fs.mkdirSync(directory, {recursive: true});
-  assert.equal(resolvePluginRoot(root, ''), fs.realpathSync(sibling));
-  assert.equal(resolvePluginRoot(root, custom), fs.realpathSync(custom));
-  const previous = process.env.MIBOT_PLUGINS_DIR;
-  try {
-    process.env.MIBOT_PLUGINS_DIR = custom;
-    assert.equal(resolvePluginRoot(root), fs.realpathSync(custom));
-    assert.equal(resolvePluginRoot(root, sibling), fs.realpathSync(sibling));
-  } finally {
-    if (previous === undefined) delete process.env.MIBOT_PLUGINS_DIR;
-    else process.env.MIBOT_PLUGINS_DIR = previous;
-  }
+  assert.throws(() => renderUnits({root: '/srv/bot\nExecStart=/bin/false', node: '/bin/node'}), /control characters/);
 });
 
 function updateFixture(t, failure = '', rootOption = '') {
@@ -191,14 +162,14 @@ test('updater detects a nested repository from its script and records successful
   const {root, result, calls, receipt} = updateFixture(t);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(calls.startsWith(`git -C ${root} rev-parse --is-inside-work-tree\n`));
-  assert.match(calls, /npm ci\nnpm run build:v2\nnpm run package:v2\nnpm run check:v2\nsystemctl restart mibot.service\n$/);
+  assert.match(calls, /npm ci\nnpm run package:v2\nnpm run check:v2\nsystemctl restart mibot.service\n$/);
   assert.deepEqual(receipt, {status: 'success', reason: ''});
 });
 
 test('updater preserves a failed step exit code and does not restart after failed build', t => {
-  const {result, calls, receipt} = updateFixture(t, 'run build:v2');
+  const {result, calls, receipt} = updateFixture(t, 'run package:v2');
   assert.equal(result.status, 7, result.stderr);
-  assert.doesNotMatch(calls, /systemctl|run package:v2|run check:v2/);
+  assert.doesNotMatch(calls, /systemctl|run check:v2/);
   assert.equal(receipt.status, 'failed');
   assert.match(receipt.reason, /构建主程序失败（退出码 7）：build-failed/);
 });

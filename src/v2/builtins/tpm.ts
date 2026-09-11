@@ -160,8 +160,10 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       await ctx.telegram.edit(invocation.message, renderFeedback({state: "working", title: "正在读取 V2 插件仓库…"}), htmlOptions);
       const {ids, collisions, descriptions = {}, descriptionsAvailable} = await repository(ctx, "search");
       const query = invocation.args.join(" ").trim().toLowerCase();
+      const installed = new Set(releases.snapshot().generations.map(item => item.id));
+      const builtins = new Set(host.listPlugins().map(plugin => plugin.id).filter(id => !installed.has(id)));
       const matches = (ids ?? []).filter(name => isPluginId(name) &&
-        (name.toLowerCase().includes(query) || descriptionFor(descriptions, name).toLowerCase().includes(query)) && !["ai", "gt"].includes(name));
+        (name.toLowerCase().includes(query) || descriptionFor(descriptions, name).toLowerCase().includes(query)) && !builtins.has(name));
       const conflictGroups = (collisions ?? []).filter(group => Array.isArray(group) && group.length > 1);
       const hint = conflictGroups.length
         ? `仓库结果仅包含允许安装的 V2 扩展；仓库存在大小写冲突组：${conflictGroups.map(group => group.join(" / ")).join("；")}（批量构建会跳过整组，精确单项仍可安装）`

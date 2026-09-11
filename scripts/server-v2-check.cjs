@@ -5,7 +5,7 @@ const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 const {randomBytes} = require('node:crypto');
 const {setTimeout: delay} = require('node:timers/promises');
-const DAILY_PLUGINS = Object.freeze(['ai', 'da', 'dc', 'dme', 'gt', 'ids', 'ip', 'nodeseek', 'rate', 'sum', 'yvlu', 'aban']);
+const CHECK_PLUGINS = Object.freeze(['ai', 'da', 'dc', 'dme', 'gt', 'ids', 'ip', 'nodeseek', 'rate', 'sum', 'yvlu', 'aban']);
 
 const production = '/root/telebox';
 function assertStopped(entries) {
@@ -89,7 +89,7 @@ function diagnostic(error) {
 async function preflight(root) {
   const core = path.join(root, 'candidate/dist/v2');
   const {prepareArtifact} = require(path.join(core, 'artifacts.js'));
-  for (const id of DAILY_PLUGINS) {
+  for (const id of CHECK_PLUGINS) {
     console.log(JSON.stringify({stage: `artifact-preflight-${id}`, result: 'running'}));
     const artifact = await prepareArtifact(path.join(root, 'candidate/plugins', id));
     try {artifact.create();} finally {artifact.release();}
@@ -173,7 +173,7 @@ async function live(root) {
     await host.load(createPrefix(host, new PrefixEnvStore(path.join(work, '.env'))));
     stage = 'load-loglevel';
     await host.load(createLogLevel(logger));
-    for (const id of DAILY_PLUGINS) {
+    for (const id of CHECK_PLUGINS) {
       stage = `load-${id}`;
       const artifact = await prepareArtifact(path.join(root, 'candidate/plugins', id));
       artifacts.push(artifact);
@@ -317,7 +317,7 @@ async function main(args) {
   else if (mode === '--guard') guard(root);
   else await live(root);
 }
-module.exports = {assertStopped, allowMessage, diagnostic, mediaMatches, main};
+module.exports = {CHECK_PLUGINS, assertStopped, allowMessage, diagnostic, mediaMatches, main};
 if (require.main === module) main(process.argv.slice(2)).catch(() => {
   console.error('Server validation precondition or execution failed');
   process.exitCode = 1;

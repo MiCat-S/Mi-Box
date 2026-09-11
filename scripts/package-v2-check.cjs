@@ -6,7 +6,7 @@ const {spawnSync} = require('node:child_process');
 const {createHash} = require('node:crypto');
 const {build} = require('./build-v2.cjs');
 const {buildPlugin} = require('./build-v2-plugin.cjs');
-const {DAILY_PLUGINS} = require('./package-v2-daily.cjs');
+const {CHECK_PLUGINS} = require('./server-v2-check.cjs');
 
 function packageCheck() {
   const project = path.resolve(__dirname, '..');
@@ -18,7 +18,7 @@ function packageCheck() {
   for (const name of ['server-v2-check.cjs', 'server-v2-check.sh']) {
     fs.copyFileSync(path.join(__dirname, name), path.join(candidate, 'scripts', name));
   }
-  for (const id of DAILY_PLUGINS) {
+  for (const id of CHECK_PLUGINS) {
     const artifact = buildPlugin({id, packageRoot: path.resolve(project, '../TeleBox-Plugins', id), entry: 'v2.ts'});
     fs.cpSync(artifact.artifactDir, path.join(candidate, 'plugins', id), {recursive: true});
   }

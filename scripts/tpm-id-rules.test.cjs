@@ -55,9 +55,9 @@ test('tpm reports a missing plugin instead of inventing an uninstall', async () 
 });
 
 test('tpm refuses to replace a default module even with different casing', async () => {
-  const h = harness([], id => id === 'ai', [{id: 'ai'}]);
-  h.setReply({id: 'ai', revision: 'c'.repeat(64)});
-  await h.run(['install', 'AI']);
+  const h = harness([], id => id === 'help', [{id: 'help'}]);
+  h.setReply({id: 'help', revision: 'c'.repeat(64)});
+  await h.run(['install', 'HELP']);
   assert.deepEqual(h.calls, [], 'default modules must not reach the repository');
   assert.deepEqual(h.activated, []);
   assert.match(h.edits.at(-1), /默认模块/);
@@ -91,7 +91,7 @@ test('tpm presents a structured not-found without an access-failure hint', async
   assert.doesNotMatch(h.edits.at(-1), /检查仓库访问/);
 });
 
-test('tpm search matches declared ids case-insensitively and hides default modules', async () => {
+test('tpm search filters declared ids case-insensitively', async () => {
   const h = harness();
   h.setReply({ids: ['git_PR', 'nezha', 'ai', 'gt']});
   await h.run(['search', 'git']);

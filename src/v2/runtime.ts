@@ -29,15 +29,12 @@ import {StorageRoot} from "./storage";
 import createTpm from "./builtins/tpm";
 import createUpdate from "./builtins/update";
 import createAutofix from "./builtins/autofix";
-import {prepareArtifact, type PreparedArtifact} from "./artifacts";
 import {TeleprotoPort, subscribeMessages} from "./telegram";
 import {AccountError, assertLegacyStopped, lockAccount, readAccount, readEnvironment} from "./account";
 import {installProtocolCompatibility, type ProtocolCompatibility, type ProtocolLogDecision} from "./protocol-compat";
 
-export const DAILY_PLUGINS = Object.freeze(["ai", "gt"] as const);
 export interface RuntimeOptions {
   root?: string;
-  pluginRoot?: string;
   signals?: readonly NodeJS.Signals[];
 }
 export interface RuntimeResult {
@@ -58,27 +55,6 @@ function protocolSink(compatibility: () => ProtocolCompatibility | undefined): (
     const level = decision === "warn" || record.level === NativeLogLevel.WARN ? "info" : record.level === NativeLogLevel.ERROR ? "error" : "info";
     logLine(level, decision === "warn" ? "telegram.channel_gap" : "telegram.protocol", {nativeLevel: record.level});
   };
-}
-
-async function loadDaily(host: PluginHost, root: string, prepared: PreparedArtifact[]): Promise<void> {
-  for (const id of DAILY_PLUGINS) {
-    const direct = path.join(root, id);
-    let directory = direct;
-    try {
-      const metadata = JSON.parse(await fs.readFile(path.join(direct, "manifest.json"), "utf8")) as {revision?: string};
-      if (typeof metadata.revision === "string" && /^[a-f0-9]{64}$/.test(metadata.revision)) {
-        const versioned = path.join(path.dirname(root), "v2-plugins", id, metadata.revision);
-        try { await fs.access(path.join(versioned, "manifest.json")); directory = versioned; } catch {}
-      }
-    } catch {}
-    const artifact = await prepareArtifact(directory);
-    if (artifact.artifact.manifest.id !== id) {
-      artifact.release();
-      throw new Error("Plugin artifact identity mismatch");
-    }
-    prepared.push(artifact);
-    await host.load(artifact.create());
-  }
 }
 
 function waitForStop(signals: readonly NodeJS.Signals[], scope: ResourceScope): Promise<string> {
@@ -110,7 +86,6 @@ function requireComplete(name: string, report: DrainReport): void {
 export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult> {
   if (process.platform !== "linux") throw new AccountError("PLATFORM");
   const root = await fs.realpath(options.root ?? process.cwd());
-  const pluginRoot = await fs.realpath(options.pluginRoot ?? path.join(root, "dist/v2-plugins-active"));
   await assertLegacyStopped(root);
   const configuration = await readAccount(root);
   const environment = await readEnvironment(root, process.env);
@@ -139,7 +114,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
   let releases: PluginReleases | undefined;
   const releaseStorage = new StorageRoot(path.join(root, "assets"));
   let detach: (() => Promise<void>) | undefined;
-  const prepared: PreparedArtifact[] = [];
+  let plugins: string[] = [];
   let reason = "startup-failed";
   let failure: unknown;
   let lifecycle: RuntimeResult["lifecycle"] | undefined;
@@ -180,7 +155,6 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     const update = createUpdate(root, selfId);
     await host.load(update);
     await host.load(createAutofix(root));
-    await loadDaily(host, pluginRoot, prepared);
     for (const [id, selected] of Object.entries((await selection.read()).plugins)) {
       await releases.activate(id, selected.current);
     }
@@ -194,8 +168,9 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
         if (!signal.aborted) logger.error("runtime.message_failed", {kind: error instanceof Error ? error.name : "unknown"});
       }
     }, {selfId});
-    logLine("info", "runtime.ready", {plugins: DAILY_PLUGINS.length, builtins: 19,
-      extensions: releases.snapshot().generations.length});
+    plugins = releases.snapshot().generations.map(item => item.id);
+    logLine("info", "runtime.ready", {plugins: plugins.length, builtins: 19,
+      extensions: plugins.length});
     const stopped = waitForStop(options.signals ?? ["SIGINT", "SIGTERM"], rootScope);
     await restart.notifyReady();
     await update.notifyReady();
@@ -215,7 +190,6 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     await attempt(async () => {if (releases) requireComplete("plugins", await releases.shutdown(30000));});
     await attempt(async () => {if (host) {hostReport = await host.shutdown(30000); requireComplete("host", hostReport);}});
     await attempt(() => releaseStorage.close());
-    if (hostReport.completed) for (const artifact of prepared.reverse()) await attempt(() => artifact.release());
     await attempt(async () => {transportReport = await transport.drain(15000); requireComplete("transport", transportReport);});
     await attempt(async () => {loggingReport = await logging.drain(15000); requireComplete("logging", loggingReport);});
     await attempt(() => client.destroy());
@@ -227,5 +201,5 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
       : new AggregateError([failure, ...failures], "Runtime and shutdown failed");
   }
   if (failure !== undefined) throw failure;
-  return {reason, plugins: [...DAILY_PLUGINS], lifecycle: lifecycle!};
+  return {reason, plugins, lifecycle: lifecycle!};
 }
