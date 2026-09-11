@@ -3,7 +3,7 @@
 ## 环境
 
 在线服务目前支持 Linux。以下命令面向 Debian/Ubuntu 的 root 终端。
-先安装 Node.js 24 和 npm，确认 `/usr/bin/node --version` 为 `v24.x`。
+先安装 Node.js 24 和 npm，确认 `node --version` 为 `v24.x`。
 不要复制其他机器的 node_modules，原生依赖需要匹配当前平台。
 
 ```sh
@@ -13,8 +13,9 @@ apt-get install -y git build-essential python3 pkg-config libcairo2-dev libpango
 
 ## 获取与构建
 
-两个仓库都使用 `main` 分支。插件目录名保留 `mibot-plugins`，
-这是打包工具默认使用的同级路径。已有目录不得直接覆盖。
+两个仓库都使用 `main` 分支。项目可放在任意目录，包括嵌套目录；
+下面使用 `/root/mibot` 作为示例。插件默认从项目同级的 `mibot-plugins`
+或 `TeleBox-Plugins` 目录读取。已有目录不得直接覆盖。
 
 ```sh
 git clone --branch main https://github.com/MiCat-S/Mi-Box.git /root/mibot
@@ -25,9 +26,24 @@ npm run package:v2
 npm run check:v2
 ```
 
+插件仓库放在其他位置时，在构建前指定实际路径：
+
+```sh
+export MIBOT_PLUGINS_DIR=/srv/mibot-plugins
+npm run package:v2
+```
+
 离线检查通过不代表 Telegram 登录或全部插件外部接口已验证。
 打包只包含默认模块所需的 `ai`、`gt`，其他扩展在 TG 通过
-`.tpm search` 和 `.tpm install 插件名` 安装，不随安装器自动启用。
+`.tpm search` 查找后安装，不随安装器自动启用。支持一次指定多个插件：
+
+```text
+.tpm install aban acron aff autochangename bgp bulk_delete checkapi clean_member dc dig dme duckduckgo encode exec ids ip keyword portball rate re
+```
+
+插件名以空格或换行分隔；重复名称只处理一次，失败项单独汇总。
+`.tpm update 插件名 [插件名 ...]` 和 `.tpm remove 插件名 [插件名 ...]`
+同样支持多个名字。`all` 单独使用。
 
 ## 登录与前台验证
 
@@ -64,6 +80,15 @@ cd /root/mibot
 npm run service:install
 ```
 
+安装器从脚本位置识别项目目录，自动选择当前 PATH 中的 Node 24，
+生成主服务和更新服务所需的绝对路径。也可明确指定：
+
+```sh
+npm run service:install -- --node /opt/node24/bin/node --plugins /srv/mibot-plugins
+```
+
+两个服务保存相同的 Node 搜索路径和插件目录，更新任务沿用这些设置。
+
 运行前须停止同账号的其他实例（包括其他机器上的实例）。此脚本用于
 首次安装，发现本机账号进程、已启用的服务或安装并发时会拒绝执行。
 不会重新登录或覆盖 config.json。失败时恢复程序和服务定义并停服，
@@ -72,24 +97,28 @@ npm run service:install
 
 ### 手动安装
 
-模板使用 `/root/mibot` 和 `/usr/bin/node`，以 root 运行。
-插件和 `.exec` 将拥有该账户权限，只安装可信代码。非 root 部署需要
-另行调整目录、所有权及 `.restart` 的服务管理授权，不能直接套用。
+在实际项目目录中生成服务文件，再检查和安装。仓库中的 `.service` 文件是
+带占位符的模板；生成器会填入当前路径。现有服务调整路径前，先停止服务，
+备份两个已安装的服务文件以及账号数据。
 
 ```sh
-cd /root/mibot
-systemd-analyze verify deploy/systemd/mibot.service
-install -m 644 deploy/systemd/mibot.service /etc/systemd/system/mibot.service
+node scripts/render-service.cjs ./temp/systemd
+systemd-analyze verify ./temp/systemd/mibot.service ./temp/systemd/mibot-update.service
+install -m 644 ./temp/systemd/mibot.service /etc/systemd/system/mibot.service
+install -m 644 ./temp/systemd/mibot-update.service /etc/systemd/system/mibot-update.service
 systemctl daemon-reload
 systemctl enable --now mibot
 systemctl status mibot --no-pager
 journalctl -u mibot -n 50 --no-pager
 ```
 
+服务以 root 运行。插件和 `.exec` 将拥有该账户权限，只安装可信代码。
+非 root 部署需要另行调整所有权及服务管理授权。
+
 服务名为 `mibot`，与 `.restart` 一致；直接执行 Node。
 升级、备份、回滚见 [运维说明](deploy/systemd/README.md)。
 
-已有 `/root/telebox` 和 `telebox-v2.service` 的部署不能直接套用新路径：
-先备份并停止旧服务，再迁移目录、插件及账号数据，安装 `mibot.service`。
+已有 `telebox-v2.service` 的部署，先备份并停止旧服务，
+在实际项目目录中生成并安装 `mibot.service` 和 `mibot-update.service`。
 确认新服务正常后禁用旧服务，禁止两个实例同时运行。GitHub 仓库地址
 不受本地目录名影响，继续使用上面的 Mi-Box 和 Mi-Box-Plugins 地址。

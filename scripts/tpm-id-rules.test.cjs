@@ -143,3 +143,21 @@ test('tpm reports a case collision instead of guessing an installed target', asy
   assert.match(h.edits.at(-1), /git_PR/);
   assert.match(h.edits.at(-1), /GIT_pr/);
 });
+
+test('selected installation deduplicates aliases after repository resolution', async () => {
+  const h = harness();
+  h.setReply({ids: ['git_PR', 'nezha'], candidates: [{id: 'git_PR', revision: 'a'.repeat(64)}, {id: 'nezha', revision: 'a'.repeat(64)}]});
+  await h.run(['install', 'git_pr', 'git_PR', 'nezha']);
+  assert.deepEqual(h.calls, [['build-selected', 'git_pr', 'git_PR', 'nezha']]);
+  assert.deepEqual(h.activated.map(item => item.id), ['git_PR', 'nezha']);
+});
+
+test('selected installation reports ambiguous names and processes independent plugins', async () => {
+  const h = harness();
+  h.setReply({ids: ['git_PR', 'GIT_pr', 'nezha'], candidates: [
+    {id: 'git_pr', error: 'AMBIGUOUS', ids: ['GIT_pr', 'git_PR']}, {id: 'nezha', revision: 'a'.repeat(64)},
+  ]});
+  await h.run(['install', 'git_pr', 'nezha']);
+  assert.deepEqual(h.activated.map(item => item.id), ['nezha']);
+  assert.match(h.edits.at(-1), /AMBIGUOUS/);
+});

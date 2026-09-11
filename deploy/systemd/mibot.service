@@ -1,4 +1,4 @@
-# Install after foreground account verification; see INSTALL.md.
+# Generate after foreground account verification; see INSTALL.md.
 [Unit]
 Description=MiBot
 Wants=network-online.target
@@ -8,9 +8,10 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-WorkingDirectory=/root/mibot
-# Operator must verify this absolute Node 24 binary path.
-ExecStart=/usr/bin/node /root/mibot/dist/v2/index.js --serve
+WorkingDirectory=@ROOT@
+ExecStart=@NODE@ @RUNTIME@ --serve
+Environment=@PATH@
+Environment=@PLUGINS@
 Environment=NODE_ENV=production
 Restart=on-failure
 RestartSec=5s

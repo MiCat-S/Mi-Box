@@ -7,10 +7,14 @@ const {buildPlugin} = require('./build-v2-plugin.cjs');
 
 const DAILY_PLUGINS = Object.freeze(['ai', 'gt']);
 
+function resolvePluginRoot(project, configured = process.env.MIBOT_PLUGINS_DIR) {
+  const preferred = path.resolve(project, '../mibot-plugins');
+  return fs.realpathSync(configured || (fs.existsSync(preferred) ? preferred : path.resolve(project, '../TeleBox-Plugins')));
+}
+
 function packageDaily(options = {}) {
   const project = fs.realpathSync(options.project || path.resolve(__dirname, '..'));
-  const preferred = path.resolve(project, '../mibot-plugins');
-  const plugins = fs.realpathSync(options.plugins || (fs.existsSync(preferred) ? preferred : path.resolve(project, '../TeleBox-Plugins')));
+  const plugins = resolvePluginRoot(project, options.plugins);
   build();
   const dist = path.join(project, 'dist');
   fs.mkdirSync(dist, {recursive: true});
@@ -42,4 +46,4 @@ if (require.main === module) {
   catch { console.error('V2 daily plugin packaging failed'); process.exitCode = 1; }
 }
 
-module.exports = {DAILY_PLUGINS, packageDaily};
+module.exports = {DAILY_PLUGINS, packageDaily, resolvePluginRoot};

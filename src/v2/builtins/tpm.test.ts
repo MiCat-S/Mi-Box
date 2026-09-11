@@ -513,3 +513,72 @@ test("TPM renders every description in bounded escaped pages", async () => {
   }).join("\n");
   for (const id of ids) assert.ok(output.includes(`${id} — ${descriptions[id]}`), id);
 });
+
+test("TPM installs a selected list once and preserves installed-target update semantics", async () => {
+  const f = fixture();
+  const ids = 'aban acron aff autochangename bgp bulk_delete checkapi clean_member dc dig dme duckduckgo encode exec ids ip keyword portball rate re'.split(' ');
+  f.generations.push({id: 'dig', state: 'active'});
+  f.ctx.processes.run = async (_exe, args) => {
+    f.operations.push(args[1]);
+    assert.deepEqual(args.slice(2), ids);
+    return {stdout: Buffer.from(JSON.stringify({ids, candidates: ids.map(id => ({id, revision: 'a'.repeat(64)}))}))};
+  };
+  await f.run(['i', ...ids, 'aban']);
+  assert.deepEqual(f.operations, ['build-selected', ...ids.map(id => `activate:${id}`)]);
+  assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /成功 20 · 跳过 0 · 失败 0/);
+});
+
+test("TPM selected batches report partial failures and skip default modules", async () => {
+  const f = fixture();
+  f.ctx.processes.run = async (_exe, args) => {
+    assert.deepEqual(args.slice(1), ['build-selected', 'dig', 'missing', 'weather']);
+    return {stdout: Buffer.from(JSON.stringify({ids: ['dig', 'weather'], candidates: [
+      {id: 'dig', revision: 'a'.repeat(64)}, {id: 'weather', error: 'BUILD'}, {id: 'missing', error: 'NOT_FOUND'},
+    ]}))};
+  };
+  await f.run(['install', 'AI', 'dig', 'missing', 'weather']);
+  assert.deepEqual(f.operations, ['activate:dig']);
+  const visible = HTMLParser.parse(f.edits.at(-1)!)[0];
+  assert.match(visible, /成功 1 · 跳过 1 · 失败 2/);
+  assert.match(visible, /weather · BUILD/);
+  assert.match(visible, /missing · NOT_AVAILABLE/);
+});
+
+test("TPM updates and removes selected plugins, deduplicating canonical names", async () => {
+  const f = fixture();
+  await f.run(['update', 'dig', 'weather']);
+  assert.deepEqual(f.operations, ['build-selected', 'activate:dig', 'activate:weather']);
+  f.operations.length = 0;
+  await f.run(['remove', 'dig', 'DIG', 'weather', 'missing', 'ai']);
+  assert.deepEqual(f.operations, ['remove:dig', 'remove:weather']);
+  assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /成功 2 · 跳过 1 · 失败 1/);
+});
+
+test("TPM rejects mixed all and invalid names before any operation", async () => {
+  const f = fixture();
+  for (const names of [[], ['all', 'dig'], ['dig', '../other'], ['dig', 'a,b']]) {
+    await f.run(['install', ...names]);
+    assert.match(f.edits.at(-1)!, /有效的插件名/);
+  }
+  assert.deepEqual(f.operations, []);
+});
+
+test("TPM selected batches reject unrequested repository candidates", async () => {
+  const f = fixture();
+  f.ctx.processes.run = async () => ({stdout: Buffer.from(JSON.stringify({ids: ['dig', 'weather', 'unexpected'], candidates: [
+    {id: 'dig', revision: 'a'.repeat(64)}, {id: 'unexpected', revision: 'a'.repeat(64)},
+  ]}))});
+  await f.run(['install', 'dig', 'weather']);
+  assert.deepEqual(f.operations, []);
+  assert.match(f.edits.at(-1)!, /插件操作失败/);
+});
+
+test("TPM selected batch cancellation stops further activation", async () => {
+  const f = fixture(), controller = new AbortController();
+  f.ctx.signal = controller.signal;
+  const activate = f.releases.activate;
+  f.releases.activate = async id => {await activate(id); controller.abort();};
+  await f.run(['install', 'dig', 'weather']);
+  assert.deepEqual(f.operations, ['build-selected', 'activate:dig']);
+  assert.doesNotMatch(f.edits.join(''), /批量安装完成/);
+});

@@ -4,8 +4,10 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/mibot
-ExecStart=/usr/bin/bash /root/mibot/scripts/update-service.sh /root/mibot
+WorkingDirectory=@ROOT@
+ExecStart=@BASH@ @UPDATE_SCRIPT@
+Environment=@PATH@
+Environment=@PLUGINS@
 User=root
 StandardOutput=journal
 StandardError=journal

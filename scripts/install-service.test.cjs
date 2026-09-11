@@ -26,3 +26,131 @@ test('public installer command and documented invocation match', () => {
   assert.equal(pkg.scripts['service:install'], 'bash scripts/install-service.sh');
   assert.match(fs.readFileSync(path.join(root, 'INSTALL.md'), 'utf8'), /npm run service:install/);
 });
+
+test('installer validates option values before operating on the host', () => {
+  for (const option of ['--node', '--plugins']) {
+    const result = spawnSync('bash', [script, option], {encoding: 'utf8'});
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /Missing value/);
+  }
+});
+
+test('service generation shares actual repository, Node and plugin paths across both units', () => {
+  const {renderUnits} = require('./render-service.cjs');
+  for (const root of ['/root/mibot/mibot', '/srv/apps/My Bot']) {
+    const units = renderUnits({root, node: '/opt/node24/bin/node', plugins: '/srv/extensions', searchPath: '/opt/npm/bin:/usr/bin'});
+    for (const unit of Object.values(units)) {
+      assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
+      assert.ok(unit.includes('Environment="MIBOT_PLUGINS_DIR=/srv/extensions"'));
+      assert.ok(unit.includes('Environment="PATH=/opt/node24/bin:/opt/npm/bin:/usr/bin:'));
+      assert.doesNotMatch(unit, /@[A-Z_]+@/);
+    }
+    assert.ok(units['mibot.service'].includes(`ExecStart="/opt/node24/bin/node" "${root}/dist/v2/index.js" --serve`));
+    assert.ok(units['mibot-update.service'].includes(`ExecStart="/bin/bash" "${root}/scripts/update-service.sh"`));
+  }
+});
+
+test('service generation preserves literal percent, dollar, quotes and spaces in paths', () => {
+  const {renderUnits} = require('./render-service.cjs');
+  const root = '/srv/50%/bot $name "quoted"';
+  const unit = renderUnits({root, node: '/opt/node/bin/node', plugins: '/srv/plugins $name', searchPath: '/usr/bin'})['mibot.service'];
+  assert.ok(unit.includes('WorkingDirectory=/srv/50%%/bot $name "quoted"/\n'));
+  assert.ok(unit.includes('"/srv/50%%/bot $$name \\"quoted\\"/dist/v2/index.js"'));
+  assert.ok(unit.includes('Environment="MIBOT_PLUGINS_DIR=/srv/plugins $name"'));
+  assert.throws(() => renderUnits({root: '/srv/bot\nExecStart=/bin/false', node: '/bin/node', plugins: '/srv/plugins'}), /control characters/);
+});
+
+test('packaging resolves explicit, configured and sibling plugin directories', t => {
+  const {resolvePluginRoot} = require('./package-v2-daily.cjs');
+  const base = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-paths-'));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  const root = path.join(base, 'nested', 'core');
+  const sibling = path.join(base, 'nested', 'mibot-plugins');
+  const custom = path.join(base, 'custom plugins');
+  for (const directory of [root, sibling, custom]) fs.mkdirSync(directory, {recursive: true});
+  assert.equal(resolvePluginRoot(root, ''), fs.realpathSync(sibling));
+  assert.equal(resolvePluginRoot(root, custom), fs.realpathSync(custom));
+  const previous = process.env.MIBOT_PLUGINS_DIR;
+  try {
+    process.env.MIBOT_PLUGINS_DIR = custom;
+    assert.equal(resolvePluginRoot(root), fs.realpathSync(custom));
+    assert.equal(resolvePluginRoot(root, sibling), fs.realpathSync(sibling));
+  } finally {
+    if (previous === undefined) delete process.env.MIBOT_PLUGINS_DIR;
+    else process.env.MIBOT_PLUGINS_DIR = previous;
+  }
+});
+
+function updateFixture(t, failure = '') {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-update-')));
+  const root = path.join(base, 'nested bot');
+  fs.mkdirSync(path.join(root, 'scripts'), {recursive: true});
+  const updater = path.join(root, 'scripts/update-service.sh');
+  fs.copyFileSync(path.join(__dirname, 'update-service.sh'), updater);
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  // Replace external operations with shell functions; execute the original updater functions.
+  const harness = `source "$1"
+node_binary="$2"
+commands="$3"
+node() { "$node_binary" "$@"; }
+git() {
+  printf 'git %s\\n' "$*" >> "$commands"
+  if [[ "$1" == rev-parse ]]; then printf '%s\\n' fixture-head; fi
+}
+npm() {
+  printf 'npm %s\\n' "$*" >> "$commands"
+  if [[ "$*" == "$FAIL_STEP" ]]; then printf '%s\\n' build-failed >&2; return 7; fi
+}
+systemctl() { printf 'systemctl %s\\n' "$*" >> "$commands"; }
+acquire_update_lock() { return 0; }
+main
+`;
+  const commands = path.join(base, 'commands');
+  const result = spawnSync('bash', ['-c', harness, 'update-test', updater, process.execPath, commands],
+    {cwd: base, encoding: 'utf8', env: {...process.env, FAIL_STEP: failure}});
+  return {root, result, calls: fs.readFileSync(commands, 'utf8'),
+    receipt: JSON.parse(fs.readFileSync(path.join(root, 'temp/update-result.json'), 'utf8'))};
+}
+
+test('updater detects a nested repository from its script and records successful restart', t => {
+  const {root, result, calls, receipt} = updateFixture(t);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(calls.startsWith(`git -C ${root} rev-parse --is-inside-work-tree\n`));
+  assert.match(calls, /npm ci\nnpm run build:v2\nnpm run package:v2\nnpm run check:v2\nsystemctl restart mibot.service\n$/);
+  assert.deepEqual(receipt, {status: 'success', reason: ''});
+});
+
+test('updater preserves a failed step exit code and does not restart after failed build', t => {
+  const {result, calls, receipt} = updateFixture(t, 'run build:v2');
+  assert.equal(result.status, 7, result.stderr);
+  assert.doesNotMatch(calls, /systemctl|run package:v2|run check:v2/);
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.reason, /构建主程序失败（退出码 7）：build-failed/);
+});
+
+test('installer rollback restores both service units and preserves account data', t => {
+  const base = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-restore-'));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  fs.mkdirSync(path.join(base, 'backup'));
+  fs.mkdirSync(path.join(base, 'dist/v2'), {recursive: true});
+  fs.writeFileSync(path.join(base, 'backup/service.before'), 'previous runtime unit');
+  fs.writeFileSync(path.join(base, 'backup/update-service.before'), 'previous update unit');
+  fs.writeFileSync(path.join(base, 'mibot.service'), 'candidate runtime unit');
+  fs.writeFileSync(path.join(base, 'mibot-update.service'), 'candidate update unit');
+  fs.writeFileSync(path.join(base, 'config.json'), 'account fixture');
+  const source = fs.readFileSync(script, 'utf8');
+  const restore = source.slice(source.indexOf('restore() {'), source.indexOf('trap restore EXIT'))
+    .replaceAll('/usr/bin/systemctl', 'systemctl');
+  const result = spawnSync('bash', ['-c', `backup="$PWD/backup"
+unit="$PWD/mibot.service"
+update_unit="$PWD/mibot-update.service"
+changed=true
+systemctl() { return 0; }
+${restore}
+(exit 7)
+restore`, 'rollback-test'], {cwd: base, encoding: 'utf8'});
+  assert.equal(result.status, 7, result.stderr);
+  assert.equal(fs.readFileSync(path.join(base, 'mibot.service'), 'utf8'), 'previous runtime unit');
+  assert.equal(fs.readFileSync(path.join(base, 'mibot-update.service'), 'utf8'), 'previous update unit');
+  assert.equal(fs.readFileSync(path.join(base, 'config.json'), 'utf8'), 'account fixture');
+});
