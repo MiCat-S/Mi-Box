@@ -82,14 +82,20 @@ function buildPlugin({id, packageRoot, entry, assets = [], rootDir = PROJECT_ROO
     fs.rmSync(metadata);
     fs.writeFileSync(path.join(stage, 'manifest.json'), manifestText, {flag: 'wx'});
     const artifactDir = path.join(parent, revision);
-    if (fs.existsSync(artifactDir)) {
+    const verifyExisting = () => {
       directory(parent, [revision]);
       if (fs.readFileSync(realFile(artifactDir, 'manifest.json'), 'utf8') !== manifestText ||
           files.some(file => hash(fs.readFileSync(realFile(artifactDir, file.file))) !== file.sha256)) {
         throw new Error('Existing plugin revision failed integrity verification');
       }
-    } else {
-      fs.renameSync(stage, artifactDir);
+    };
+    if (fs.existsSync(artifactDir)) verifyExisting();
+    else {
+      try { fs.renameSync(stage, artifactDir); }
+      catch (error) {
+        if (error.code !== 'EEXIST' && error.code !== 'ENOTEMPTY') throw error;
+        verifyExisting();
+      }
     }
     return {artifactDir, manifest};
   } finally {

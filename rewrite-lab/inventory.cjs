@@ -7,7 +7,7 @@ const ts = require("typescript");
 
 const core = path.resolve(__dirname, "..");
 const plugins = path.resolve(core, "../TeleBox-Plugins");
-const installed = ["ai", "da", "dc", "dme", "gt", "ids", "ip", "nodeseek", "rate", "sum", "yvlu"];
+const installed = ["ai", "da", "dc", "dme", "gt", "ids", "ip", "rate", "sum", "yvlu"];
 
 function inspect(file) {
   const text = fs.readFileSync(file, "utf8");

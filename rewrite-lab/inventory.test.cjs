@@ -8,7 +8,7 @@ test("inventory covers repository modules with production extensions marked as p
   assert.equal(report.schemaVersion, 2);
   assert.ok(report.counts.extensions >= report.catalog.entries);
   assert.deepEqual(report.catalog.missingSources, []);
-  assert.equal(report.sources.filter(s => s.productionPriority).length, 11);
+  assert.equal(report.sources.filter(s => s.productionPriority).length, 10);
   const core = path.resolve(__dirname, "..");
   const plugins = path.resolve(core, "../TeleBox-Plugins");
   const expected = fs.readdirSync(path.join(core, "src/plugin"))
@@ -61,10 +61,8 @@ test("inventory includes core services, web assets and auxiliary runtimes", () =
   assert.ok(report.sources.every(s => !/\.(test|spec)\./.test(s.file)));
 });
 
-test("inventory finds raw MTProto operations and external runtime dependency", () => {
+test("inventory finds raw MTProto operations", () => {
   const dme = report.sources.find(s => s.file.endsWith("/dme/dme.ts"));
   assert.ok(dme.apiConstructors.includes("Api.channels.GetSendAs"));
   assert.ok(dme.apiConstructors.includes("Api.messages.EditMessage"));
-  const ns = report.sources.find(s => s.file.endsWith("/nodeseek/nodeseek.ts"));
-  assert.ok(ns.imports.includes("child_process") || ns.imports.includes("node:child_process"));
 });

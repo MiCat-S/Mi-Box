@@ -182,14 +182,14 @@ test("privacy command is listed with system tools", async (t) => {
 });
 
 test("production-sized rich-text catalog fits one compact message", async (t) => {
-  const ids = "agent ai alias autofix bf da dc dme env exec gt ids ip leech loglevel memory nodeseek ping prefix rate re restart status sudo sum sure sysinfo tpm update yvlu".split(" ");
+  const ids = "agent ai alias autofix bf da dc dme env exec gt ids ip leech loglevel memory ping prefix rate re restart status sudo sum sure sysinfo tpm update yvlu".split(" ");
   const entries = [...ids.map((id) => plugin(id)), plugin("help", ["h", "help"]), plugin("version", ["ver", "version"])];
   const f = fixture(t, entries);
   f.setConfiguration({ prefixes: [".", "。", "$"], aliases: {} });
   const messages = await f.run();
   const text = visible(messages);
   assert.equal(messages.length, 1, "the complete catalog edits only the invoking message");
-  assert.match(text, /34 个命令/);
+  assert.match(text, /33 个命令/);
   assert.ok(text.split("\n").length <= 26, text);
   assert.ok(text.length < 750, text);
   assert.ok(messages[0].text.includes("<b>⚡ 常用命令</b>"));

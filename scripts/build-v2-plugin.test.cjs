@@ -91,3 +91,21 @@ test('asset names cannot replace code or integrity metadata', t => {
   write('asset.txt', 'fixture');
   assert.throws(() => build({assets: ['asset.txt', './asset.txt']}), /Duplicate/);
 });
+
+test('concurrent publication verifies the winning revision before reusing it',t=>{
+  const {build,root}=fixture(t),rename=fs.renameSync;
+  t.after(()=>{fs.renameSync=rename;});
+  for(const tampered of [false,true]){
+    fs.rmSync(path.join(root,'dist'),{recursive:true,force:true});
+    let raced=false;
+    fs.renameSync=(source,target)=>{raced=true;fs.cpSync(source,target,{recursive:true});if(tampered)fs.appendFileSync(path.join(target,'index.cjs'),'\n// altered');return rename(source,target);};
+    if(tampered)assert.throws(build,/integrity verification/);
+    else{const result=build();assert.ok(fs.existsSync(path.join(result.artifactDir,'index.cjs')));assert.deepEqual(fs.readdirSync(path.dirname(result.artifactDir)),[result.manifest.revision]);}
+    assert.equal(raced,true);
+  }
+});
+
+test('publication errors other than competing revisions propagate',t=>{
+  const {build}=fixture(t),rename=fs.renameSync,error=Object.assign(new Error('denied'),{code:'EPERM'});
+  t.after(()=>{fs.renameSync=rename;});fs.renameSync=()=>{throw error;};assert.throws(build,value=>value===error);
+});

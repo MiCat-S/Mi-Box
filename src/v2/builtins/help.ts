@@ -12,7 +12,7 @@ type CatalogCommand = ReturnType<HelpHost["listCommands"]>[number];
 
 const pluginIcons: Readonly<Record<string, string>> = {
   ai: "🤖", da: "🛡️", dc: "🌐", dme: "🗑️", gt: "🌍", ids: "🪪",
-  ip: "📍", nodeseek: "🔎", rate: "💱", sum: "📝", yvlu: "🖼️",
+  ip: "📍", rate: "💱", sum: "📝", yvlu: "🖼️",
   memory: "🧠", ping: "🏓", status: "📊", env: "⚙️", alias: "🔗",
   prefix: "📌", privacy: "🔒", loglevel: "🔊", help: "❔",
 };

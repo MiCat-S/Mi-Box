@@ -8,7 +8,6 @@ Settings.now = () => Date.parse(referenceTime);
 const wallOnly = process.argv.includes('--wall');
 
 const fixtures = [
-  ['nodeseek', '0 8 * * *', 'Asia/Shanghai', '2026-09-05T00:00:00Z'],
   ['sum-seconds', '*/15 * * * * *', 'Asia/Shanghai', '2026-09-05T00:00:07Z'],
   ['weekdays', '0 9 * * mon-fri', 'Asia/Shanghai', '2026-09-04T01:00:00Z'],
   ['month-day-or-weekday', '0 0 15 * mon', 'UTC', '2026-09-01T00:00:00Z'],

@@ -5,7 +5,7 @@ const path = require('node:path');
 const {spawnSync} = require('node:child_process');
 const {randomBytes} = require('node:crypto');
 const {setTimeout: delay} = require('node:timers/promises');
-const CHECK_PLUGINS = Object.freeze(['ai', 'da', 'dc', 'dme', 'gt', 'ids', 'ip', 'nodeseek', 'rate', 'sum', 'yvlu', 'aban']);
+const CHECK_PLUGINS = Object.freeze(['ai', 'da', 'dc', 'dme', 'gt', 'ids', 'ip', 'rate', 'sum', 'yvlu', 'aban']);
 
 const production = '/root/telebox';
 function assertStopped(entries) {
