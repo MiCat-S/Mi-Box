@@ -28,10 +28,61 @@ test('public installer command and documented invocation match', () => {
 });
 
 test('installer validates option values before operating on the host', () => {
-  for (const option of ['--node', '--plugins']) {
-    const result = spawnSync('bash', [script, option], {encoding: 'utf8'});
-    assert.equal(result.status, 2);
-    assert.match(result.stderr, /Missing value/);
+  for (const option of ['--root', '--node', '--plugins']) {
+    for (const extra of [[], ['--plugins', '/tmp/plugins']]) {
+      const result = spawnSync('bash', [script, option, ...extra], {encoding: 'utf8'});
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /Missing value/);
+    }
+  }
+});
+
+test('installer resolves caller-relative paths before entering the selected deployment', t => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-install-')));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  for (const dir of ['deployed bot', 'custom plugins']) fs.mkdirSync(path.join(base, dir));
+  fs.symlinkSync(path.join(base, 'deployed bot'), path.join(base, 'alias'));
+  const source = fs.readFileSync(script, 'utf8');
+  // Exercise argument and path handling, stopping before systemd or account operations.
+  const setup = source.slice(0, source.indexOf('for executable in '))
+    .replace(/^\[\[ \$\(uname -s\).*$/m, '');
+  const result = spawnSync('bash', ['-c', `${setup}\nprintf '%s\\n' "$PWD" "$MIBOT_PLUGINS_DIR" "$node"`,
+    script, '--root', './alias', '--plugins', './custom plugins', '--node', process.execPath], {cwd: base, encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split('\n'), [path.join(base, 'deployed bot'), path.join(base, 'custom plugins'), process.execPath]);
+});
+
+test('renderer CLI resolves deployment aliases and plugin options independently of its own repository', t => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-render-')));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  const root = path.join(base, 'nested', 'deployed bot');
+  const sibling = path.join(base, 'nested', 'mibot-plugins');
+  const custom = path.join(base, 'custom plugins');
+  for (const dir of [root, sibling, custom]) fs.mkdirSync(dir, {recursive: true});
+  fs.symlinkSync(root, path.join(base, 'alias'));
+  for (const plugins of [undefined, './custom plugins']) {
+    const args = [path.join(__dirname, 'render-service.cjs'), './units', '--root', './alias'];
+    if (plugins) args.push('--plugins', plugins);
+    const result = spawnSync(process.execPath, args, {cwd: base, encoding: 'utf8', env: {...process.env, MIBOT_PLUGINS_DIR: ''}});
+    assert.equal(result.status, 0, result.stderr);
+    for (const name of ['mibot.service', 'mibot-update.service']) {
+      const unit = fs.readFileSync(path.join(base, 'units', name), 'utf8');
+      assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
+      assert.ok(unit.includes(`Environment="MIBOT_PLUGINS_DIR=${plugins ? custom : sibling}"`));
+      assert.ok(unit.includes(name === 'mibot.service' ? `${root}/dist/v2/index.js` : `${root}/scripts/update-service.sh`));
+    }
+  }
+});
+
+test('renderer rejects invalid arguments before writing service files', t => {
+  const base = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-invalid-'));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  for (const args of [['--root'], ['--plugins', '--root', '/tmp'], ['--force']]) {
+    const output = path.join(base, 'units');
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'render-service.cjs'), output, ...args], {encoding: 'utf8'});
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Missing value|Unsupported argument/);
+    assert.equal(fs.existsSync(output), false);
   }
 });
 
@@ -81,7 +132,7 @@ test('packaging resolves explicit, configured and sibling plugin directories', t
   }
 });
 
-function updateFixture(t, failure = '') {
+function updateFixture(t, failure = '', rootOption = '') {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-update-')));
   const root = path.join(base, 'nested bot');
   fs.mkdirSync(path.join(root, 'scripts'), {recursive: true});
@@ -103,14 +154,38 @@ npm() {
 }
 systemctl() { printf 'systemctl %s\\n' "$*" >> "$commands"; }
 acquire_update_lock() { return 0; }
-main
+shift 3
+main "$@"
 `;
   const commands = path.join(base, 'commands');
-  const result = spawnSync('bash', ['-c', harness, 'update-test', updater, process.execPath, commands],
+  const selected = path.join(base, 'selected bot');
+  if (rootOption) fs.mkdirSync(selected);
+  const args = rootOption === '--root' ? ['--root', './selected bot'] : rootOption ? ['./selected bot'] : [];
+  const result = spawnSync('bash', ['-c', harness, 'update-test', updater, process.execPath, commands, ...args],
     {cwd: base, encoding: 'utf8', env: {...process.env, FAIL_STEP: failure}});
-  return {root, result, calls: fs.readFileSync(commands, 'utf8'),
-    receipt: JSON.parse(fs.readFileSync(path.join(root, 'temp/update-result.json'), 'utf8'))};
+  const actualRoot = rootOption ? selected : root;
+  return {root: actualRoot, result, calls: fs.readFileSync(commands, 'utf8'),
+    receipt: JSON.parse(fs.readFileSync(path.join(actualRoot, 'temp/update-result.json'), 'utf8'))};
 }
+
+test('updater accepts an explicit deployment using named or positional paths', t => {
+  for (const option of ['--root', 'positional']) {
+    const {root, result, calls, receipt} = updateFixture(t, '', option);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(calls.startsWith(`git -C ${root} rev-parse --is-inside-work-tree\n`));
+    assert.match(calls, /systemctl restart mibot.service/);
+    assert.deepEqual(receipt, {status: 'success', reason: ''});
+  }
+});
+
+test('updater help and invalid arguments never enter update operations', () => {
+  const updater = path.join(__dirname, 'update-service.sh');
+  for (const args of [['--help'], ['--root'], ['--root', '--help'], ['--force']]) {
+    const result = spawnSync('bash', [updater, ...args], {encoding: 'utf8'});
+    assert.equal(result.status, args[0] === '--help' ? 0 : 2, result.stderr);
+    assert.match(result.stdout + result.stderr, /Usage: bash scripts\/update-service.sh/);
+  }
+});
 
 test('updater detects a nested repository from its script and records successful restart', t => {
   const {root, result, calls, receipt} = updateFixture(t);

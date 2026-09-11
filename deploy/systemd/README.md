@@ -10,11 +10,15 @@ journalctl -u mibot-update.service -n 100 --no-pager
 ```
 服务名为 `mibot`。安装器根据项目实际目录、当前 Node 24 可执行文件
 和插件目录生成两个服务，支持嵌套目录及带空格的路径。
-初次安装可用 `npm run service:install -- --node /path/to/node --plugins /path/to/plugins`
-指定路径；省略参数时从 PATH 和同级插件目录检测。
+初次安装可用 `npm run service:install -- --root /path/to/project --node /path/to/node --plugins /path/to/plugins`
+指定路径；每个参数均可省略，默认从脚本位置、PATH 和同级插件目录检测。
+相对路径以调用时的工作目录为准；`--root` 选择已有部署，不移动项目及账号数据。
 
 已有服务需要调整路径时，先停止服务并备份两个服务文件与账号数据，
 再在实际项目目录运行 `node scripts/render-service.cjs ./temp/systemd`。
+生成器可通过 `--root DIRECTORY` 和 `--plugins DIRECTORY` 指定已有目录，
+输出位置由第一个参数决定。直接执行更新脚本时可使用
+`bash scripts/update-service.sh --root DIRECTORY`，也兼容原有的位置参数。
 按 [手动安装步骤](../../INSTALL.md#手动安装) 检查并替换两个服务文件。
 更新任务从自身脚本位置识别仓库，使用服务中保存的 PATH 和
 `MIBOT_PLUGINS_DIR`；仓库内的模板文件不能直接作为服务安装。

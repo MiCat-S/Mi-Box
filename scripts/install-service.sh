@@ -4,25 +4,31 @@ set -euo pipefail
 umask 077
 
 if [[ "${1:-}" == "--help" && $# == 1 ]]; then
-  printf '%s\n' 'Usage: bash scripts/install-service.sh [--node PATH] [--plugins DIRECTORY]' \
+  printf '%s\n' 'Usage: bash scripts/install-service.sh [--root DIRECTORY] [--node PATH] [--plugins DIRECTORY]' \
     'Requires Linux/systemd, root, Node 24, dependencies and config.json.' \
-    'Uses the script repository directory and Node from PATH; --node selects another binary.' \
+    'Defaults to the script repository directory; --root selects an existing deployment.' \
+    'Uses Node from PATH; --node selects another binary. Relative options use the caller directory.' \
     'Plugins default to MIBOT_PLUGINS_DIR or sibling mibot-plugins / TeleBox-Plugins.' \
     'Installs and starts mibot. Refuses active or enabled services.'
   exit 0
 fi
 node=$(command -v node || true)
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --node|--plugins)
-      [[ $# -ge 2 && -n "$2" ]] || { echo "Missing value for $1" >&2; exit 2; }
-      if [[ "$1" == --node ]]; then node="$2"; else export MIBOT_PLUGINS_DIR="$2"; fi
+    --root|--node|--plugins)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "Missing value for $1" >&2; exit 2; }
+      case "$1" in
+        --root) root="$2" ;;
+        --node) node="$2" ;;
+        --plugins) export MIBOT_PLUGINS_DIR="$2" ;;
+      esac
       shift 2 ;;
     *) echo "Unsupported arguments: $1" >&2; exit 2 ;;
   esac
 done
 [[ $(uname -s) == Linux && $EUID == 0 ]] || { echo "Run on Linux as root" >&2; exit 1; }
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+root=$(cd -- "$root" && pwd -P)
 # Resolve caller-relative options before changing to the repository directory.
 [[ -n "$node" && -x "$node" ]] || { echo "Node 24 required; use --node PATH or add it to PATH" >&2; exit 1; }
 node=$("$node" -p 'process.execPath')

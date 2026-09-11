@@ -84,10 +84,14 @@ npm run service:install
 生成主服务和更新服务所需的绝对路径。也可明确指定：
 
 ```sh
-npm run service:install -- --node /opt/node24/bin/node --plugins /srv/mibot-plugins
+npm run service:install -- --root /srv/mibot --node /opt/node24/bin/node --plugins /srv/mibot-plugins
 ```
 
-两个服务保存相同的 Node 搜索路径和插件目录，更新任务沿用这些设置。
+三个参数均可省略；`--root` 选择已有部署目录，不会移动或复制项目。
+相对路径以执行命令时的工作目录为准，目录符号链接会解析为实际路径。
+两个服务保存相同的部署目录、Node 搜索路径和插件目录，更新任务沿用这些设置。
+程序、配置及账号数据继续保存在部署目录内；服务注册文件位于
+`/etc/systemd/system`。
 
 运行前须停止同账号的其他实例（包括其他机器上的实例）。此脚本用于
 首次安装，发现本机账号进程、已启用的服务或安装并发时会拒绝执行。
@@ -111,6 +115,11 @@ systemctl enable --now mibot
 systemctl status mibot --no-pager
 journalctl -u mibot -n 50 --no-pager
 ```
+
+生成器也支持 `node scripts/render-service.cjs ./temp/systemd --root /srv/mibot --plugins /srv/mibot-plugins`。
+输出目录相对于当前工作目录，Node 路径取执行生成器的 Node 24；省略选项时
+使用生成器所在项目及默认插件目录。直接运行更新脚本时，可用
+`bash scripts/update-service.sh --root /srv/mibot` 选择已有部署，省略时从脚本位置识别。
 
 服务以 root 运行。插件和 `.exec` 将拥有该账户权限，只安装可信代码。
 非 root 部署需要另行调整所有权及服务管理授权。

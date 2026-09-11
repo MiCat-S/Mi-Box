@@ -37,12 +37,26 @@ function renderUnits({root, node, plugins, searchPath = process.env.PATH || '', 
 
 if (require.main === module) {
   try {
-    if (process.argv.length !== 3 || process.argv[2].startsWith('--')) throw new Error('Usage: node scripts/render-service.cjs OUTPUT_DIRECTORY');
+    const args = process.argv.slice(2);
+    const usage = 'Usage: node scripts/render-service.cjs OUTPUT_DIRECTORY [--root DIRECTORY] [--plugins DIRECTORY]';
+    if (args.length === 1 && args[0] === '--help') { console.log(usage); process.exit(0); }
+    const output = args.shift();
+    if (!output || output.startsWith('--')) throw new Error(usage);
+    let project = path.resolve(__dirname, '..');
+    let plugins;
+    while (args.length) {
+      const option = args.shift();
+      if (!['--root', '--plugins'].includes(option)) throw new Error(`Unsupported argument: ${option}\n${usage}`);
+      const value = args.shift();
+      if (!value || value.startsWith('--')) throw new Error(`Missing value for ${option}`);
+      if (option === '--root') project = value;
+      else plugins = value;
+    }
     if (process.versions.node.split('.')[0] !== '24') throw new Error('Node 24 required');
-    const root = fs.realpathSync(path.resolve(__dirname, '..'));
-    const units = renderUnits({root, node: process.execPath, plugins: resolvePluginRoot(root)});
-    fs.mkdirSync(process.argv[2], {recursive: true});
-    for (const [name, content] of Object.entries(units)) fs.writeFileSync(path.join(process.argv[2], name), content, {mode: 0o600});
+    const root = fs.realpathSync(project);
+    const units = renderUnits({root, node: process.execPath, plugins: resolvePluginRoot(root, plugins)});
+    fs.mkdirSync(output, {recursive: true});
+    for (const [name, content] of Object.entries(units)) fs.writeFileSync(path.join(output, name), content, {mode: 0o600});
   } catch (error) {console.error(error.message); process.exitCode = 1;}
 }
 

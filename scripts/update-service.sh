@@ -39,7 +39,13 @@ acquire_update_lock() {
 }
 
 main() {
-  [[ $# -le 1 ]] || { echo "Usage: bash scripts/update-service.sh [REPOSITORY_DIRECTORY]" >&2; return 2; }
+  local usage='Usage: bash scripts/update-service.sh [--root DIRECTORY | REPOSITORY_DIRECTORY]'
+  if [[ $# == 1 && "$1" == --help ]]; then printf '%s\n' "$usage"; return 0; fi
+  if [[ "${1:-}" == --root ]]; then
+    [[ $# == 2 && -n "$2" && "$2" != --* ]] || { echo "$usage" >&2; return 2; }
+    shift
+  fi
+  [[ $# == 0 || ( $# == 1 && -n "$1" && "$1" != --* ) ]] || { echo "$usage" >&2; return 2; }
   root=${1:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
   root=$(cd -- "$root" && pwd -P)
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null
