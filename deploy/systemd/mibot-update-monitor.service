@@ -1,0 +1,14 @@
+[Unit]
+Description=MiBot automatic update check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@ROOT@
+ExecStart=@BASH@ @UPDATE_SCRIPT@ --automatic
+Environment=@PATH@
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mibot-update-monitor

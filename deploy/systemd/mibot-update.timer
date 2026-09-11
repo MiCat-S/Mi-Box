@@ -1,0 +1,12 @@
+[Unit]
+Description=Check GitHub for MiBot updates every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=30s
+AccuracySec=1min
+Persistent=true
+Unit=mibot-update-monitor.service
+
+[Install]
+WantedBy=timers.target

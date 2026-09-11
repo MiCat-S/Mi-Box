@@ -8,6 +8,7 @@ import path from "node:path";
 import {isOwnerOrGroupSendAs} from "../permissions";
 import type {ProcessError} from "../processes";
 import {renderCommandHelp} from "../commands";
+import {Api} from "teleproto";
 
 const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
 
@@ -15,7 +16,9 @@ type Receipt = {ownerId: string; chatId: string; messageId: number; requestedAt:
   requestId?: string};
 type UpdateState = {pending: Receipt | null};
 type UpdateResult = {status: "success" | "failed"; reason?: string | null; requestId?: string;
-  previousVersion?: string; currentVersion?: string; previousRevision?: string; currentRevision?: string};
+  previousVersion?: string; currentVersion?: string; previousRevision?: string; currentRevision?: string;
+  trigger?: "automatic"; automaticId?: string};
+interface AutoConfig extends Record<string, unknown> {enabled: boolean; lastResultId?: string;}
 interface UpdateRuntimeOptions {pollIntervalMs?: number; resultTimeoutMs?: number; startupGraceMs?: number; now?: () => number;}
 type ServiceStatusRow = {key: string; value: string};
 type ServiceStatusField = "LoadState" | "ActiveState" | "UnitFileState" | "SubState" | "CanStart" | "FragmentPath" | "Result";
@@ -25,6 +28,9 @@ const VERSION_TOKEN = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
 const REVISION_TOKEN = /^[0-9a-f]{7,64}$/i;
 const CHANGELOG_REF = "https://github.com/MiCat-S/Mi-Box/blob/main/CHANGELOG.md";
 const UPDATE_NOTES_HTML_BUDGET = 2400;
+const AUTOMATIC_ID_TOKEN = /^[0-9a-f]{64}$/i;
+const AUTO_TIMER = "mibot-update.timer";
+const AUTO_UNITS = ["mibot-update-monitor.service", AUTO_TIMER] as const;
 
 /** Select releases in changelog order, from the installed target back to but excluding the previous version. */
 export function selectChangelogReleases(
@@ -71,6 +77,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
   let context: PluginContext | undefined;
   let recoveryStarted = false;
   let stateOperation: Promise<void> = Promise.resolve();
+  let automaticResultOperation: Promise<void> = Promise.resolve();
   const updateService = "mibot-update.service";
   const pollIntervalMs = options.pollIntervalMs ?? 1000;
   const resultTimeoutMs = options.resultTimeoutMs ?? 10 * 60_000;
@@ -84,7 +91,9 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     return result;
   };
   const store = (ctx: PluginContext) => ctx.storage.json<UpdateState>("update-receipt.json", {pending: null});
+  const autoStore = (ctx: PluginContext) => ctx.storage.json<AutoConfig>("config.json", {enabled: false});
   const resultFile = path.join(root, "temp", "update-result.json");
+  const automaticResultFile = path.join(root, "temp", "automatic-update-result.json");
   const requestFile = path.join(root, "temp", "update-request.json");
   const sameReceipt = (current: Receipt | null, expected: Receipt): boolean => !!current &&
     (expected.requestId !== undefined
@@ -101,6 +110,19 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
           {timeoutMs: 1500, maxOutputBytes: 600});
         const text = value.stdout.toString("utf8").trim() || "unknown";
         rows.push({key: field, value: text});
+      } catch {
+        rows.push({key: field, value: "unavailable"});
+      }
+    }
+    return rows;
+  };
+  const readUnitStatusRows = async (ctx: PluginContext, unit: string, fields: readonly string[]): Promise<ServiceStatusRow[]> => {
+    const rows: ServiceStatusRow[] = [];
+    for (const field of fields) {
+      try {
+        const value = await ctx.processes.run("/usr/bin/systemctl", ["show", "--value", "-p", field, unit],
+          {timeoutMs: 1500, maxOutputBytes: 600});
+        rows.push({key: field, value: value.stdout.toString("utf8").trim() || "unknown"});
       } catch {
         rows.push({key: field, value: "unavailable"});
       }
@@ -311,6 +333,54 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     return brandText(`<b>MiBot 更新失败</b>\n更新未完成，请查看 <code>.update check</code> 或服务器日志。${
       detail ? `\n原因：${escapeHtml(detail)}` : ""}`);
   };
+  const automaticFinalText = async (ctx: PluginContext, result: Partial<UpdateResult>): Promise<string> => {
+    if (result.status === "success") {
+      const details = await successfulUpdateDetails(ctx, result);
+      return brandText("<b>MiBot 自动更新成功</b>\n检测到 GitHub 更新并完成安装，服务已恢复运行。") +
+        (details ? `\n\n${details}` : "");
+    }
+    const detail = formatUpdateResult(result);
+    return brandText(`<b>MiBot 自动更新失败</b>\nGitHub 更新未能完成。${
+      detail ? `\n原因：${escapeHtml(detail)}` : ""}\n\n请检查：\n` +
+      `<code>journalctl -u mibot-update-monitor.service -n 80 --no-pager</code>`);
+  };
+  const readAutomaticResult = async (): Promise<Partial<UpdateResult> | undefined> => {
+    try {
+      const handle = await open(automaticResultFile, "r");
+      try {
+        const metadata = await handle.stat();
+        if (metadata.size > 64 * 1024) return undefined;
+        const result = JSON.parse(await handle.readFile("utf8")) as Partial<UpdateResult>;
+        if ((result.status === "success" || result.status === "failed") && result.trigger === "automatic" &&
+            typeof result.automaticId === "string" && AUTOMATIC_ID_TOKEN.test(result.automaticId)) return result;
+      } finally {
+        await handle.close();
+      }
+    } catch {}
+  };
+  const deliverAutomaticResultNow = async (ctx: PluginContext): Promise<void> => {
+    const result = await readAutomaticResult();
+    if (!result?.automaticId) return;
+    const config = await autoStore(ctx).read();
+    if (config.lastResultId === result.automaticId) return;
+    const text = await automaticFinalText(ctx, result);
+    try {
+      await ctx.telegram.withClient(async client => {
+        await client.sendMessage(new Api.InputPeerSelf(), {
+          message: text, parseMode: "html", linkPreview: false, silent: true,
+        });
+      });
+    } catch {
+      if (!ctx.signal.aborted) ctx.log.error("update.automatic_notification_failed");
+      return;
+    }
+    await autoStore(ctx).update(current => ({...current, lastResultId: result.automaticId}));
+  };
+  const deliverAutomaticResult = (ctx: PluginContext): Promise<void> => {
+    const delivery = automaticResultOperation.then(() => deliverAutomaticResultNow(ctx));
+    automaticResultOperation = delivery.catch(() => undefined);
+    return delivery;
+  };
   const serviceState = async (ctx: PluginContext): Promise<string> => {
     const [row] = await readServiceStatusRows(ctx, ["ActiveState"]);
     return row?.value ?? "unavailable";
@@ -401,14 +471,52 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
   };
 
   const autoSwitch = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
-    const store = ctx.storage.json<{enabled: boolean}>("config.json", {enabled: false});
     const action = invocation.args[0]?.toLowerCase();
-    if (action === "on" || action === "off") {
-      await store.update(value => ({...value, enabled: action === "on"}));
+    if (action !== undefined && action !== "on" && action !== "off") {
+      await ctx.telegram.edit(invocation.message, `用法：${invocation.prefix}update auto [on|off]`);
+      return;
     }
-    const current = await store.read();
-    await ctx.telegram.edit(invocation.message,
-      `自动更新：<b>${current.enabled ? "开启" : "关闭"}</b>\n当前仅保存开关状态，不会在后台自动执行`, htmlOptions);
+    if (!await rootCheck(invocation, ctx)) return;
+    try {
+      if (action === "on") {
+        await ctx.files.withTemp(async directory => {
+          await ctx.processes.run(process.execPath,
+            [path.join(root, "scripts/render-service.cjs"), directory, "--root", root],
+            {timeoutMs: 10_000, maxOutputBytes: 4000});
+          await ctx.processes.run("/usr/bin/systemd-analyze",
+            ["verify", ...AUTO_UNITS.map(unit => path.join(directory, unit))],
+            {timeoutMs: 10_000, maxOutputBytes: 4000});
+          for (const unit of AUTO_UNITS) {
+            await ctx.processes.run("/usr/bin/install", ["-m", "0644", path.join(directory, unit),
+              path.join("/etc/systemd/system", unit)], {timeoutMs: 5000, maxOutputBytes: 2000});
+          }
+        });
+        await ctx.processes.run("/usr/bin/systemctl", ["daemon-reload"], {timeoutMs: 5000, maxOutputBytes: 2000});
+        await ctx.processes.run("/usr/bin/systemctl", ["enable", "--now", AUTO_TIMER],
+          {timeoutMs: 10_000, maxOutputBytes: 4000});
+        await autoStore(ctx).update(value => ({...value, enabled: true}));
+      } else if (action === "off") {
+        const [load] = await readUnitStatusRows(ctx, AUTO_TIMER, ["LoadState"]);
+        if (load?.value === "loaded") {
+          await ctx.processes.run("/usr/bin/systemctl", ["disable", "--now", AUTO_TIMER],
+            {timeoutMs: 10_000, maxOutputBytes: 4000});
+        }
+        await autoStore(ctx).update(value => ({...value, enabled: false}));
+      }
+      const rows = await readUnitStatusRows(ctx, AUTO_TIMER,
+        ["LoadState", "ActiveState", "UnitFileState", "NextElapseUSecRealtime"]);
+      const state = Object.fromEntries(rows.map(row => [row.key, row.value]));
+      const enabled = state.LoadState === "loaded" && state.ActiveState === "active" && state.UnitFileState === "enabled";
+      const next = enabled && !["", "unknown", "unavailable"].includes(state.NextElapseUSecRealtime ?? "")
+        ? `\n下次检查：<code>${escapeHtml(state.NextElapseUSecRealtime)}</code>` : "";
+      await ctx.telegram.edit(invocation.message,
+        `自动更新：<b>${enabled ? "开启" : "关闭"}</b>\n监测分支：<code>origin/main</code>\n检查间隔：约 10 分钟${next}`,
+        htmlOptions);
+    } catch (error) {
+      ctx.log.error("update.automatic_toggle_failed", {kind: error instanceof Error ? error.name : "unknown"});
+      await ctx.telegram.edit(invocation.message,
+        brandText("<b>自动更新设置失败</b>\n无法配置 systemd 监测任务，请检查服务权限和安装日志。"), htmlOptions);
+    }
   };
 
   const rootCheck = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
@@ -558,10 +666,11 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       },
       auto: {
         group: "命令：",
-        description: "查看或保存自动更新开关；当前版本的后台行为仅为保存配置",
+        description: "查看或控制 GitHub 自动更新监测，每约 10 分钟检查 origin/main",
         args: "[on|off]",
-        arguments: [{name: "on|off", description: "省略时只查看；填写 on/off 时保存开关状态"}],
+        arguments: [{name: "on|off", description: "省略时查看 systemd timer 状态；on/off 启停监测"}],
         examples: [{args: "auto"}, {args: "auto on"}, {args: "auto off"}],
+        authorize: authorizeOwner,
         handle: autoSwitch,
       },
       check: {
@@ -592,7 +701,8 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
           "• 需要 Linux、systemd、root 身份运行的主程序，以及已安装的更新服务。\n" +
           "• 更新任务会检查依赖并重建运行时，成功后重启服务；短暂断开连接属于重启过程。\n" +
           "• 同时只能执行一个更新任务；遇到“已有更新任务”时等待回执。\n" +
-          "• 自动更新开关目前不会触发后台更新；手动更新使用 run。",
+          "• 自动更新开启后，systemd 每约 10 分钟检查 origin/main；没有新提交时不会构建或重启。\n" +
+          "• 自动更新只接受可快进且工作树干净的部署分支，结果发送到 Saved Messages。",
       },
       {
         heading: "常见问题：",
@@ -620,11 +730,18 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     setup(ctx) { context = ctx; },
     cleanup() { context = undefined; },
     commands: {update: updateCommand},
+    jobs: {automaticResult: {
+      cron: "* * * * *",
+      description: "发送自动更新结果到 Saved Messages",
+      async handle(ctx) { await deliverAutomaticResult(ctx); },
+    }},
   });
   return Object.freeze({...definition, async notifyReady(): Promise<void> {
     const ctx = context;
     if (!ctx || recoveryStarted) return;
     recoveryStarted = true;
     startRecovery(ctx);
+    const automatic = ctx.tasks.run("update:automatic-result", () => deliverAutomaticResult(ctx));
+    void automatic.catch(() => { if (!ctx.signal.aborted) ctx.log.error("update.automatic_result_failed"); });
   }});
 }

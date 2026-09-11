@@ -74,12 +74,15 @@ NODE
 
 unit=/etc/systemd/system/mibot.service
 update_unit=/etc/systemd/system/mibot-update.service
-for target in "$unit" "$update_unit"; do
+update_monitor_unit=/etc/systemd/system/mibot-update-monitor.service
+update_timer_unit=/etc/systemd/system/mibot-update.timer
+for target in "$unit" "$update_unit" "$update_monitor_unit" "$update_timer_unit"; do
   [[ ! -L "$target" ]] || { echo "Refusing a symlink service unit: $target" >&2; exit 1; }
 done
 backup=$(mktemp -d "$(dirname -- "$root")/mibot-install.XXXXXX")
 "$node" scripts/render-service.cjs "$backup/units"
-/usr/bin/systemd-analyze verify "$backup/units/mibot.service" "$backup/units/mibot-update.service"
+/usr/bin/systemd-analyze verify "$backup/units/mibot.service" "$backup/units/mibot-update.service" \
+  "$backup/units/mibot-update-monitor.service" "$backup/units/mibot-update.timer"
 printf 'Backup: %s\n' "$backup"
 for entry in dist/v2; do
   [[ ! -L "$entry" ]] || { echo "Refusing symlink artifact: $entry" >&2; exit 1; }
@@ -87,6 +90,8 @@ for entry in dist/v2; do
 done
 if [[ -f "$unit" ]]; then cp -p "$unit" "$backup/service.before"; fi
 if [[ -f "$update_unit" ]]; then cp -p "$update_unit" "$backup/update-service.before"; fi
+if [[ -f "$update_monitor_unit" ]]; then cp -p "$update_monitor_unit" "$backup/update-monitor-service.before"; fi
+if [[ -f "$update_timer_unit" ]]; then cp -p "$update_timer_unit" "$backup/update-timer.before"; fi
 data=(config.json)
 if [[ -d assets ]]; then data+=(assets); fi
 if [[ -f .env ]]; then data+=(.env); fi
@@ -104,6 +109,8 @@ restore() {
     done
     if [[ -f "$backup/service.before" ]]; then cp -p "$backup/service.before" "$unit"; else rm -f "$unit"; fi
     if [[ -f "$backup/update-service.before" ]]; then cp -p "$backup/update-service.before" "$update_unit"; else rm -f "$update_unit"; fi
+    if [[ -f "$backup/update-monitor-service.before" ]]; then cp -p "$backup/update-monitor-service.before" "$update_monitor_unit"; else rm -f "$update_monitor_unit"; fi
+    if [[ -f "$backup/update-timer.before" ]]; then cp -p "$backup/update-timer.before" "$update_timer_unit"; else rm -f "$update_timer_unit"; fi
     /usr/bin/systemctl daemon-reload
     echo "Account data retained. Service left stopped. Backup: $backup" >&2
   fi
@@ -116,6 +123,8 @@ printf '%s\n' 'Building MiBot...'
 "$node" dist/v2/index.js --check > "$backup/check.log" 2>&1
 install -m 644 "$backup/units/mibot.service" "$unit"
 install -m 644 "$backup/units/mibot-update.service" "$update_unit"
+install -m 644 "$backup/units/mibot-update-monitor.service" "$update_monitor_unit"
+install -m 644 "$backup/units/mibot-update.timer" "$update_timer_unit"
 /usr/bin/systemctl daemon-reload
 /usr/bin/systemctl reset-failed mibot || true
 /usr/bin/systemctl enable --now mibot

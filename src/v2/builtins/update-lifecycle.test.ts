@@ -3,6 +3,7 @@ import test, {type TestContext} from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {Api} from "teleproto";
 import {ResourceScope} from "../lifecycle";
 import {StorageRoot} from "../storage";
 import createUpdate from "./update";
@@ -30,7 +31,9 @@ async function fixture(t: TestContext, options: {
   const scope = new ResourceScope();
   const storage = new StorageRoot(path.join(root, "assets"));
   const receipts = storage.json<State>("update", "update-receipt.json", {pending: null});
+  const autoConfig = storage.json<{enabled: boolean; lastResultId?: string}>("update", "config.json", {enabled: false});
   const edits: {id: number; text: string}[] = [];
+  const automaticMessages: {peer: unknown; text: string}[] = [];
   const logs: string[] = [];
   const calls: string[][] = [];
   let activeState = options.activeState ?? "inactive";
@@ -59,6 +62,12 @@ async function fixture(t: TestContext, options: {
         edits.push({id: message.id, text});
         await options.edit?.(message, text);
       },
+      async withClient<T>(operation: (client: {sendMessage(peer: unknown, payload: {message: string}): Promise<void>},
+        signal: AbortSignal) => Promise<T>): Promise<T> {
+        return operation({async sendMessage(peer, payload) {
+          automaticMessages.push({peer, text: payload.message});
+        }}, scope.signal);
+      },
     },
   } as unknown as PluginContext;
   const plugin = createUpdate(root, "1", {pollIntervalMs: 5,
@@ -80,7 +89,7 @@ async function fixture(t: TestContext, options: {
     command: "update", args: [], prefix: ".",
     message: {id, chatId: String(id), senderId: "1", outgoing: true, text: ".update"},
   } as CommandInvocation, ctx);
-  return {root, scope, receipts, edits, logs, calls, ctx, plugin, run,
+  return {root, scope, receipts, autoConfig, edits, automaticMessages, logs, calls, ctx, plugin, run,
     setActiveState(value: string) { activeState = value; }};
 }
 
@@ -160,6 +169,32 @@ test("a successful no-op update reports that no code changed", async t => {
   await waitFor(async () => (await f.receipts.read()).pending === null);
   assert.match(f.edits.at(-1)!.text, /本次没有代码变更/);
   assert.match(f.edits.at(-1)!.text, /0\.7\.6/);
+});
+
+test("automatic update results are sent once to Saved Messages", async t => {
+  const f = await fixture(t, {activeState: "inactive"});
+  const automaticId = "c".repeat(64);
+  await fs.writeFile(path.join(f.root, "package.json"), JSON.stringify({version: "0.7.7"}));
+  await fs.writeFile(path.join(f.root, "CHANGELOG.md"),
+    "# Changelog\n\n## [0.7.7] - 2026-09-11\n\n- 自动监测 GitHub 更新。\n\n## [0.7.6]\n\n- old\n");
+  await fs.mkdir(path.join(f.root, "temp"), {recursive: true});
+  await fs.writeFile(path.join(f.root, "temp/automatic-update-result.json"), JSON.stringify({
+    status: "success", reason: "", trigger: "automatic", automaticId,
+    previousVersion: "0.7.6", currentVersion: "0.7.7",
+    previousRevision: "a".repeat(40), currentRevision: "b".repeat(40),
+  }));
+  await Promise.all([
+    f.plugin.notifyReady(),
+    f.plugin.jobs!.automaticResult.handle(f.ctx, f.scope.signal),
+  ]);
+  await waitFor(() => f.automaticMessages.length === 1);
+  assert.ok(f.automaticMessages[0].peer instanceof Api.InputPeerSelf);
+  assert.match(f.automaticMessages[0].text, /自动更新成功/);
+  assert.match(f.automaticMessages[0].text, /自动监测 GitHub 更新/);
+  assert.equal((await f.autoConfig.read()).lastResultId, automaticId);
+
+  await f.plugin.jobs!.automaticResult.handle(f.ctx, f.scope.signal);
+  assert.equal(f.automaticMessages.length, 1);
 });
 
 test("legacy receipts ignore an older id-less result but accept a fresh 0.7.1 result", async t => {

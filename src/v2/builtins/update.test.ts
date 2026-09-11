@@ -20,9 +20,8 @@ function fixture(outputs: RunResult[] = [], options: {sender?: string} = {}) {
   const controller = new AbortController();
   const calls: string[][] = [];
   const edits: string[] = [];
+  const stores = new Map<string, Record<string, unknown>>();
   let step = 0;
-  let updateState: {pending: null | {ownerId: string; chatId: string; messageId: number; requestedAt: number;
-    bootId: string; requestId?: string}} = {pending: null};
   const originalGetuid = process.getuid;
   const originalDescriptor = Object.getOwnPropertyDescriptor(process, "getuid");
 
@@ -31,11 +30,13 @@ function fixture(outputs: RunResult[] = [], options: {sender?: string} = {}) {
     tasks: {
       run: async () => Promise.resolve(),
     } as unknown as PluginContext["tasks"],
-    storage: {json: () => ({
-      read: async () => updateState,
-      update: async (fn: (value: typeof updateState) => typeof updateState | Promise<typeof updateState>) => {
-        updateState = await fn(updateState);
-        return updateState;
+    storage: {json: <T extends Record<string, unknown>>(file: string, defaults: T) => ({
+      read: async () => (stores.get(file) ?? structuredClone(defaults)) as T,
+      update: async (fn: (value: T) => T | Promise<T>) => {
+        const current = (stores.get(file) ?? structuredClone(defaults)) as T;
+        const updated = await fn(current);
+        stores.set(file, updated);
+        return updated;
       },
     })},
     log: {error: () => {}, info: () => {}},
@@ -53,7 +54,9 @@ function fixture(outputs: RunResult[] = [], options: {sender?: string} = {}) {
     http: {withResponse: async () => ({status: 200, headers: new Headers(), body: ""}),
       text: async () => "", json: async () => ({}),
     },
-    files: {dataPath: "", dataDirectory: "", dataFile: () => "", withTemp: () => Promise.resolve(undefined)},
+    files: {dataPath: "", dataDirectory: "", dataFile: () => "",
+      withTemp: async (use: (directory: string, signal: AbortSignal) => Promise<unknown>) =>
+        use("/tmp/update-auto-units", controller.signal)},
     telegram: {
       async edit(_message: MessageEnvelope, text: string) { edits.push(text); },
       async reply(_message: MessageEnvelope, text: string) { edits.push(text); },
@@ -90,6 +93,54 @@ test("非所有者无法发起更新", async (t) => {
   t.after(f.restore);
   await createUpdate(undefined, "123").commands.update.handle(f.inv, f.ctx);
   assert.match(f.edits[0], /只有账号所有者/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("自动更新开关安装并启用 GitHub 监测 timer", async t => {
+  const f = fixture([
+    {}, {}, {}, {}, {}, {},
+    {stdout: "loaded"}, {stdout: "active"}, {stdout: "enabled"},
+    {stdout: "2026-09-12 04:00:00 CST"},
+  ]);
+  t.after(f.restore);
+  Object.defineProperty(process, "getuid", {value: () => 0, configurable: true});
+  await createUpdate("/fixture", "123").commands.update.handle({...f.inv, args: ["auto", "on"]}, f.ctx);
+  assert.deepEqual(f.calls.slice(0, 6), [
+    [process.execPath, "/fixture/scripts/render-service.cjs", "/tmp/update-auto-units", "--root", "/fixture"],
+    ["/usr/bin/systemd-analyze", "verify", "/tmp/update-auto-units/mibot-update-monitor.service",
+      "/tmp/update-auto-units/mibot-update.timer"],
+    ["/usr/bin/install", "-m", "0644", "/tmp/update-auto-units/mibot-update-monitor.service",
+      "/etc/systemd/system/mibot-update-monitor.service"],
+    ["/usr/bin/install", "-m", "0644", "/tmp/update-auto-units/mibot-update.timer",
+      "/etc/systemd/system/mibot-update.timer"],
+    ["/usr/bin/systemctl", "daemon-reload"],
+    ["/usr/bin/systemctl", "enable", "--now", "mibot-update.timer"],
+  ]);
+  assert.match(f.edits.at(-1)!, /自动更新：<b>开启/);
+  assert.match(f.edits.at(-1)!, /约 10 分钟/);
+  assert.match(f.edits.at(-1)!, /2026-09-12 04:00:00 CST/);
+});
+
+test("自动更新关闭命令停用 systemd timer", async t => {
+  const f = fixture([
+    {stdout: "loaded"}, {},
+    {stdout: "loaded"}, {stdout: "inactive"}, {stdout: "disabled"}, {stdout: ""},
+  ]);
+  t.after(f.restore);
+  Object.defineProperty(process, "getuid", {value: () => 0, configurable: true});
+  await createUpdate("/fixture", "123").commands.update.handle({...f.inv, args: ["auto", "off"]}, f.ctx);
+  assert.deepEqual(f.calls.slice(0, 2), [
+    ["/usr/bin/systemctl", "show", "--value", "-p", "LoadState", "mibot-update.timer"],
+    ["/usr/bin/systemctl", "disable", "--now", "mibot-update.timer"],
+  ]);
+  assert.match(f.edits.at(-1)!, /自动更新：<b>关闭/);
+});
+
+test("非所有者不能启停自动更新", async t => {
+  const f = fixture([], {sender: "999"});
+  t.after(f.restore);
+  await createUpdate("/fixture", "123").commands.update.handle({...f.inv, args: ["auto", "on"]}, f.ctx);
+  assert.match(f.edits.at(-1)!, /只有账号所有者/);
   assert.equal(f.calls.length, 0);
 });
 

@@ -24,7 +24,12 @@ function renderUnits({root, node, searchPath = process.env.PATH || '', bash = '/
     BASH: quote(bash), UPDATE_SCRIPT: argument(path.join(root, 'scripts/update-service.sh')),
     PATH: quote(`PATH=${commandPath}`),
   };
-  return Object.fromEntries(['mibot.service', 'mibot-update.service'].map(name => {
+  return Object.fromEntries([
+    'mibot.service',
+    'mibot-update.service',
+    'mibot-update-monitor.service',
+    'mibot-update.timer',
+  ].map(name => {
     const template = fs.readFileSync(path.join(__dirname, '../deploy/systemd', name), 'utf8');
     const content = template.replace(/@([A-Z_]+)@/g, (_match, key) => {
       if (!Object.hasOwn(replacements, key)) throw new Error(`Unknown service placeholder: ${key}`);

@@ -61,11 +61,13 @@ test('renderer CLI uses the selected deployment without a plugin source checkout
   const result = spawnSync(process.execPath, [path.join(__dirname, 'render-service.cjs'), './units', '--root', './alias'],
     {cwd: base, encoding: 'utf8'});
   assert.equal(result.status, 0, result.stderr);
-  for (const name of ['mibot.service', 'mibot-update.service']) {
+  for (const name of ['mibot.service', 'mibot-update.service', 'mibot-update-monitor.service', 'mibot-update.timer']) {
     const unit = fs.readFileSync(path.join(base, 'units', name), 'utf8');
-    assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
-    assert.ok(unit.includes(name === 'mibot.service' ? `${root}/dist/v2/index.js` : `${root}/scripts/update-service.sh`));
+    if (name !== 'mibot-update.timer') assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
+    if (name === 'mibot.service') assert.ok(unit.includes(`${root}/dist/v2/index.js`));
+    if (name.includes('update') && name.endsWith('.service')) assert.ok(unit.includes(`${root}/scripts/update-service.sh`));
   }
+  assert.match(fs.readFileSync(path.join(base, 'units/mibot-update.timer'), 'utf8'), /OnCalendar=\*:0\/10/);
 });
 
 test('renderer rejects invalid arguments before writing service files', t => {
@@ -80,17 +82,21 @@ test('renderer rejects invalid arguments before writing service files', t => {
   }
 });
 
-test('service generation shares actual repository and Node paths across both units', () => {
+test('service generation shares actual repository and Node paths across runtime and update units', () => {
   const {renderUnits} = require('./render-service.cjs');
   for (const root of ['/root/mibot/mibot', '/srv/apps/My Bot']) {
     const units = renderUnits({root, node: '/opt/node24/bin/node', searchPath: '/opt/npm/bin:/usr/bin'});
-    for (const unit of Object.values(units)) {
+    for (const name of ['mibot.service', 'mibot-update.service', 'mibot-update-monitor.service']) {
+      const unit = units[name];
       assert.ok(unit.includes(`WorkingDirectory=${root}/\n`));
       assert.ok(unit.includes('Environment="PATH=/opt/node24/bin:/opt/npm/bin:/usr/bin:'));
       assert.doesNotMatch(unit, /@[A-Z_]+@/);
     }
     assert.ok(units['mibot.service'].includes(`ExecStart="/opt/node24/bin/node" "${root}/dist/v2/index.js" --serve`));
     assert.ok(units['mibot-update.service'].includes(`ExecStart="/bin/bash" "${root}/scripts/update-service.sh"`));
+    assert.ok(units['mibot-update-monitor.service'].includes(`ExecStart="/bin/bash" "${root}/scripts/update-service.sh" --automatic`));
+    assert.match(units['mibot-update.timer'], /Unit=mibot-update-monitor\.service/);
+    assert.doesNotMatch(units['mibot-update.timer'], /@[A-Z_]+@/);
   }
 });
 
@@ -130,7 +136,11 @@ npm() {
   if [[ "$*" == "$FAIL_STEP" ]]; then printf '%s\\n' build-failed >&2; return 7; fi
   if [[ "$1" == ci ]]; then mkdir -p node_modules; fi
 }
-systemctl() { printf 'systemctl %s\\n' "$*" >> "$commands"; }
+systemctl() {
+  printf 'systemctl %s\\n' "$*" >> "$commands"
+  if [[ "$1" == show && "$*" == *InvocationID* ]]; then printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi
+}
+journalctl() { printf '%s\\n' '{"event":"runtime.ready"}'; }
 acquire_update_lock() { return 0; }
 shift 3
 main "$@"
@@ -150,6 +160,73 @@ main "$@"
     {cwd: base, encoding: 'utf8', env: {...process.env, FAIL_STEP: failure}});
   return {root: actualRoot, result, calls: fs.readFileSync(commands, 'utf8'),
     receipt: JSON.parse(fs.readFileSync(path.join(actualRoot, 'temp/update-result.json'), 'utf8'))};
+}
+
+function automaticUpdateFixture(t, options = {}) {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-auto-update-')));
+  const root = path.join(base, 'deployment');
+  fs.mkdirSync(path.join(root, 'scripts'), {recursive: true});
+  const updater = path.join(root, 'scripts/update-service.sh');
+  fs.copyFileSync(path.join(__dirname, 'update-service.sh'), updater);
+  fs.writeFileSync(path.join(root, 'package-lock.json'), '{"lockfileVersion":3}\n');
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"fixture","version":"0.7.6"}\n');
+  fs.mkdirSync(path.join(root, 'temp'));
+  const manualReceipt = {status: 'success', reason: 'manual-result'};
+  fs.writeFileSync(path.join(root, 'temp/update-result.json'), JSON.stringify(manualReceipt));
+  const commands = path.join(base, 'commands');
+  const harness = `source "$1"
+node_binary="$2"
+commands="$3"
+node() { "$node_binary" "$@"; }
+git() {
+  printf 'git %s\\n' "$*" >> "$commands"
+  if [[ "$1" == -C ]]; then shift 2; fi
+  case "$1" in
+    rev-parse)
+      if [[ "$*" == *refs/remotes/origin/main* ]]; then printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      elif [[ -f .fixture-merged ]]; then printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      else printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi ;;
+    rev-list) printf '%s %s\\n' "$AHEAD" "$BEHIND" ;;
+    diff) [[ "$DIRTY" != true ]] ;;
+    ls-files) [[ "$UNTRACKED" != true ]] || printf '%s\\n' unexpected-source.ts ;;
+    merge)
+      printf '%s\\n' '{"name":"fixture","version":"0.7.7"}' > package.json
+      printf '%s\\n' '{"lockfileVersion":3,"revision":"new"}' > package-lock.json
+      touch .fixture-merged ;;
+    reset)
+      printf '%s\\n' '{"name":"fixture","version":"0.7.6"}' > package.json
+      printf '%s\\n' '{"lockfileVersion":3}' > package-lock.json
+      rm -f .fixture-merged ;;
+  esac
+}
+npm() {
+  printf 'npm %s\\n' "$*" >> "$commands"
+  if [[ "$*" == "$FAIL_STEP" && ! -f .fixture-failed ]]; then
+    touch .fixture-failed
+    printf '%s\\n' automatic-build-failed >&2
+    return 7
+  fi
+  if [[ "$1" == ci ]]; then mkdir -p node_modules; fi
+}
+systemctl() {
+  printf 'systemctl %s\\n' "$*" >> "$commands"
+  if [[ "$1" == show && "$*" == *InvocationID* ]]; then printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi
+}
+journalctl() { printf '%s\\n' '{"event":"runtime.ready"}'; }
+acquire_update_lock() { return 0; }
+shift 3
+main --automatic --root "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'automatic-update-test', updater, process.execPath, commands, root],
+    {cwd: root, encoding: 'utf8', env: {...process.env, AHEAD: String(options.ahead ?? 0),
+      BEHIND: String(options.behind ?? 1), DIRTY: String(options.dirty ?? false),
+      UNTRACKED: String(options.untracked ?? false),
+      FAIL_STEP: options.failure ?? ''}});
+  const resultFile = path.join(root, 'temp/automatic-update-result.json');
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  return {root, result, calls: fs.readFileSync(commands, 'utf8'),
+    receipt: fs.existsSync(resultFile) ? JSON.parse(fs.readFileSync(resultFile, 'utf8')) : undefined,
+    manualReceipt: JSON.parse(fs.readFileSync(path.join(root, 'temp/update-result.json'), 'utf8'))};
 }
 
 test('updater accepts an explicit deployment using named or positional paths', t => {
@@ -176,7 +253,8 @@ test('updater detects a nested repository from its script and records successful
   const {root, result, calls, receipt} = updateFixture(t);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(calls.startsWith(`git -C ${root} rev-parse --is-inside-work-tree\n`));
-  assert.match(calls, /npm ci\nnpm run package:v2\nnpm run check:v2\nsystemctl restart mibot.service\n$/);
+  assert.match(calls,
+    /npm ci\nnpm run package:v2\nnpm run check:v2\nsystemctl restart mibot.service\nsystemctl show mibot.service -p InvocationID --value\n$/);
   assert.deepEqual(receipt, {status: 'success', reason: '', previousVersion: '0.7.5', currentVersion: '0.7.6',
     previousRevision: 'a'.repeat(40), currentRevision: 'b'.repeat(40)});
 });
@@ -198,6 +276,66 @@ test('updater carries the accepted request id into its atomic result', t => {
     currentRevision: 'b'.repeat(40)});
   assert.equal(fs.existsSync(path.join(root, 'temp/update-request.json')), false);
   assert.equal(fs.readdirSync(path.join(root, 'temp')).some(name => name.startsWith('update-request.claim.')), false);
+});
+
+test('automatic checks leave a current deployment untouched and silent', t => {
+  const {result, calls, receipt} = automaticUpdateFixture(t, {behind: 0});
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(calls, /git fetch origin main/);
+  assert.match(calls, /git rev-list --left-right --count HEAD\.\.\.refs\/remotes\/origin\/main/);
+  assert.doesNotMatch(calls, /git merge|npm |systemctl restart/);
+  assert.equal(receipt, undefined);
+});
+
+test('automatic checks fast-forward, verify readiness and record an isolated deduplicated result', t => {
+  const {result, calls, receipt, manualReceipt} = automaticUpdateFixture(t);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(calls, /git merge --ff-only refs\/remotes\/origin\/main/);
+  assert.match(calls, /systemctl restart mibot.service/);
+  assert.deepEqual(receipt, {
+    status: 'success', reason: '', previousVersion: '0.7.6', currentVersion: '0.7.7',
+    previousRevision: 'a'.repeat(40), currentRevision: 'b'.repeat(40),
+    trigger: 'automatic', automaticId: receipt.automaticId,
+  });
+  assert.match(receipt.automaticId, /^[0-9a-f]{64}$/);
+  assert.deepEqual(manualReceipt, {status: 'success', reason: 'manual-result'});
+});
+
+test('automatic checks refuse tracked changes before updating', t => {
+  const {result, calls, receipt} = automaticUpdateFixture(t, {dirty: true});
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(calls, /git merge|npm |systemctl restart/);
+  assert.match(receipt.reason, /未提交的已跟踪文件变更/);
+  assert.equal(receipt.trigger, 'automatic');
+});
+
+test('automatic checks refuse untracked files before updating', t => {
+  const {result, calls, receipt} = automaticUpdateFixture(t, {untracked: true});
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(calls, /git merge|npm |systemctl restart/);
+  assert.match(receipt.reason, /未提交的未跟踪文件/);
+  assert.equal(receipt.trigger, 'automatic');
+});
+
+test('automatic update failures restore the verified previous revision', t => {
+  const {root, result, calls, receipt} = automaticUpdateFixture(t, {failure: 'run package:v2'});
+  assert.equal(result.status, 7);
+  assert.match(calls, /git reset --hard a{40}/);
+  assert.equal(calls.match(/^npm ci$/gm)?.length, 2);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version, '0.7.6');
+  const fingerprint = require('node:crypto').createHash('sha256')
+    .update(fs.readFileSync(path.join(root, 'package-lock.json'))).digest('hex');
+  assert.equal(fs.readFileSync(path.join(root, 'node_modules/.mibot-package-lock.sha256'), 'utf8'), fingerprint + '\n');
+  assert.match(receipt.reason, /构建主程序失败.*已自动恢复上一版本/);
+  assert.equal(receipt.currentRevision, 'a'.repeat(40));
+});
+
+test('automatic failure and success results for one remote revision have distinct notification ids', t => {
+  const failed = automaticUpdateFixture(t, {failure: 'run package:v2'});
+  const succeeded = automaticUpdateFixture(t);
+  assert.equal(failed.result.status, 7);
+  assert.equal(succeeded.result.status, 0, succeeded.result.stderr);
+  assert.notEqual(failed.receipt.automaticId, succeeded.receipt.automaticId);
 });
 
 test('a rejected updater lock does not consume or overwrite another request', t => {
@@ -241,7 +379,8 @@ elif [[ "$1 $2" == 'run package:v2' && -f node_modules/incomplete ]]; then
   exit 34
 fi
 `);
-  executable('systemctl', '#!/bin/bash\nprintf "%s\\n" "systemctl $*" >> calls\n');
+  executable('systemctl', '#!/bin/bash\nprintf "%s\\n" "systemctl $*" >> calls\nif [[ "$1" == show && "$*" == *InvocationID* ]]; then printf "%s\\n" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi\n');
+  executable('journalctl', '#!/bin/bash\nprintf "%s\\n" "{\\"event\\":\\"runtime.ready\\"}"\n');
   const updater = path.join(__dirname, 'update-service.sh');
   const harness = 'source "$1"; acquire_update_lock() { :; }; main "$2"';
   const run = () => spawnSync('bash', ['-c', harness, 'retry-test', updater, root], {cwd: root, encoding: 'utf8',
@@ -254,15 +393,19 @@ fi
   assert.match(fs.readFileSync(path.join(root, 'node_modules/.mibot-package-lock.sha256'), 'utf8'), /^[0-9a-f]{64}\n$/);
 });
 
-test('installer rollback restores both service units and preserves account data', t => {
+test('installer rollback restores runtime and automatic update units while preserving account data', t => {
   const base = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-restore-'));
   t.after(() => fs.rmSync(base, {recursive: true, force: true}));
   fs.mkdirSync(path.join(base, 'backup'));
   fs.mkdirSync(path.join(base, 'dist/v2'), {recursive: true});
   fs.writeFileSync(path.join(base, 'backup/service.before'), 'previous runtime unit');
   fs.writeFileSync(path.join(base, 'backup/update-service.before'), 'previous update unit');
+  fs.writeFileSync(path.join(base, 'backup/update-monitor-service.before'), 'previous update monitor unit');
+  fs.writeFileSync(path.join(base, 'backup/update-timer.before'), 'previous update timer');
   fs.writeFileSync(path.join(base, 'mibot.service'), 'candidate runtime unit');
   fs.writeFileSync(path.join(base, 'mibot-update.service'), 'candidate update unit');
+  fs.writeFileSync(path.join(base, 'mibot-update-monitor.service'), 'candidate update monitor unit');
+  fs.writeFileSync(path.join(base, 'mibot-update.timer'), 'candidate update timer');
   fs.writeFileSync(path.join(base, 'config.json'), 'account fixture');
   const source = fs.readFileSync(script, 'utf8');
   const restore = source.slice(source.indexOf('restore() {'), source.indexOf('trap restore EXIT'))
@@ -270,6 +413,8 @@ test('installer rollback restores both service units and preserves account data'
   const result = spawnSync('bash', ['-c', `backup="$PWD/backup"
 unit="$PWD/mibot.service"
 update_unit="$PWD/mibot-update.service"
+update_monitor_unit="$PWD/mibot-update-monitor.service"
+update_timer_unit="$PWD/mibot-update.timer"
 changed=true
 systemctl() { return 0; }
 ${restore}
@@ -278,5 +423,7 @@ restore`, 'rollback-test'], {cwd: base, encoding: 'utf8'});
   assert.equal(result.status, 7, result.stderr);
   assert.equal(fs.readFileSync(path.join(base, 'mibot.service'), 'utf8'), 'previous runtime unit');
   assert.equal(fs.readFileSync(path.join(base, 'mibot-update.service'), 'utf8'), 'previous update unit');
+  assert.equal(fs.readFileSync(path.join(base, 'mibot-update-monitor.service'), 'utf8'), 'previous update monitor unit');
+  assert.equal(fs.readFileSync(path.join(base, 'mibot-update.timer'), 'utf8'), 'previous update timer');
   assert.equal(fs.readFileSync(path.join(base, 'config.json'), 'utf8'), 'account fixture');
 });
