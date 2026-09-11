@@ -1,0 +1,4 @@
+interface:
+  display_name: "MiBot 开发"
+  short_description: "依据 V2 宿主与 SDK 规范开发 MiBot 核心、扩展插件及生命周期测试"
+  default_prompt: "使用 $mibot-development，按当前 MiBot 架构实现需求并完成相关验证。"

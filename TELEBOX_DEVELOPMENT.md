@@ -1,5 +1,7 @@
 # TeleBox 开发规范
 
+> 本文记录旧版插件系统及其迁移背景。MiBot V2 开发使用 [MiBot 开发 Skill](skills/mibot-development/SKILL.md) 和 [V2 SDK](docs/v2-sdk.md)；本文中的旧基类、全局客户端及加载接口仅供维护对应历史实现时参考。
+
 ## 目录
 
 <details>

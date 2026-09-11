@@ -1,11 +1,11 @@
 # V2 命令与消息过滤 SDK
 
-适用于 Core 0.5.0。先更新 Core，再安装或更新使用结构化声明的扩展。
+结构化声明从 Core 0.5.0 起提供。先更新 Core，再安装或更新使用结构化声明的扩展。
 Core 继续接收现有 API 1 插件；新命令声明使用 `STRUCTURED_PLUGIN_API_VERSION`。
 旧 Core 缺少此能力时会明确拒绝加载，插件激活失败按现有发布机制恢复原版本。
 构建产物的 manifest ABI 仍使用 `PLUGIN_API_VERSION`，与插件声明能力版本分别管理。
 
-每个插件保持一处业务实现。Core 内置与按需安装的扩展各自维护所属命令、帮助及回归测试；`leech`、`re`、`sure` 由插件仓库提供。`ai`、`gt` 的默认打包复用扩展源码；历史兼容包只保留身份和说明。
+每个插件保持一处业务实现。Core 内置与按需安装的扩展各自维护所属命令、帮助及回归测试；`ai`、`gt`、`leech`、`re`、`sure` 由插件仓库提供，通过 TPM 安装。Core 独立构建，历史兼容包只保留身份和说明。架构约束及开发流程见 [MiBot 开发 Skill](../skills/mibot-development/SKILL.md)。
 
 ## 命令声明
 

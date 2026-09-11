@@ -71,6 +71,7 @@ TPM 仅允许账号所有者管理扩展。安装和更新从配套插件仓库�
 
 ## 开发
 
+- 架构与开发 Skill：[`mibot-development`](skills/mibot-development/SKILL.md)，包含模块归属、资源生命周期、插件模板和验证流程。
 - SDK：`src/v2/sdk.ts`
 - 核心入口：`src/v2/index.ts`
 - 插件入口：插件目录内的 `v2.ts`
