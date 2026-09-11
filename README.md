@@ -8,6 +8,10 @@ V2 预编译后由 Node 直接运行，生产服务使用 systemd。
 请按 [安装指南](INSTALL.md) 完成双仓库检出、依赖安装、插件打包、
 首次登录和服务配置。默认 `main` 分支提供 V2。
 
+在实际核心仓库目录执行以下命令。插件默认从同级的 `mibot-plugins`
+或 `TeleBox-Plugins` 目录读取；放在其他位置时，先执行
+`export MIBOT_PLUGINS_DIR=/实际插件目录`，再构建。
+
 ```sh
 npm ci
 npm run package:v2
@@ -16,10 +20,19 @@ npm run login
 npm start
 ```
 
-在核心仓库执行；插件仓库须按安装指南放在同级目录。
 `npm start` 用于前台验证，长期运行使用 systemd。
 完成登录并停止前台实例后，可运行 `npm run service:install` 一键安装
 并启用 systemd 服务，要求详见安装指南。
+
+安装器默认从脚本位置识别部署目录，使用 PATH 中的 Node 24 和上述插件目录。
+也可按需指定路径，三个参数均可省略：
+
+```sh
+npm run service:install -- --root /实际部署目录 --node /实际Node路径/bin/node --plugins /实际插件目录
+```
+
+`--root` 选择已有部署目录，程序、配置和账号数据保存在该目录内。
+主服务和更新服务使用同一组路径；相对路径以调用时的工作目录为准。
 
 ## 功能
 
