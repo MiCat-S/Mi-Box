@@ -24,6 +24,7 @@ async function fixture(t: TestContext, options: {
   activeState?: string;
   edit?: (message: MessageEnvelope, text: string) => void | Promise<void>;
   resultTimeoutMs?: number;
+  gitVersions?: Readonly<Record<string, string>>;
 } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "mibot-update-lifecycle-")));
   const scope = new ResourceScope();
@@ -42,9 +43,13 @@ async function fixture(t: TestContext, options: {
     tasks: scope,
     log: {info() {}, error(event: string) { logs.push(event); }},
     storage: {json: <T extends Record<string, unknown>>(file: string, defaults: T) => storage.json<T>("update", file, defaults)},
-    processes: {run: async (_command: string, args: string[]) => {
+    processes: {run: async (command: string, args: string[]) => {
       calls.push(args);
       if (args[0] === "start") activeState = "active";
+      if (command === "/usr/bin/git" && args[2] === "show") {
+        const version = options.gitVersions?.[args[3]];
+        return {stdout: Buffer.from(version ? JSON.stringify({version}) : ""), stderr: Buffer.alloc(0), exitCode: 0};
+      }
       const property = args[args.indexOf("-p") + 1];
       const value = property === "ActiveState" ? activeState : fields[property] ?? "";
       return {stdout: Buffer.from(value), stderr: Buffer.alloc(0), exitCode: 0};
@@ -122,8 +127,12 @@ test("notifyReady observes a missing result in the managed background until the 
   assert.match(f.edits.at(-1)!.text, /已结束但未返回对应结果/);
 });
 
-test("legacy id-less receipts accept a 0.7.1 result and release ownership even when notification fails", async t => {
-  const f = await fixture(t, {activeState: "inactive", edit: async () => { throw new Error("telegram unavailable"); }});
+test("legacy id-less receipts recover the version range and release ownership even when notification fails", async t => {
+  const f = await fixture(t, {activeState: "inactive", gitVersions: {"ORIG_HEAD:package.json": "0.7.5"},
+    edit: async () => { throw new Error("telegram unavailable"); }});
+  await fs.writeFile(path.join(f.root, "package.json"), JSON.stringify({version: "0.7.6"}));
+  await fs.writeFile(path.join(f.root, "CHANGELOG.md"),
+    "# Changelog\n\n## [0.7.6] - 2026-09-11\n\n- 新增 <摘要>。\n\n## [0.7.5]\n\n- 旧内容。\n");
   await f.receipts.update(() => ({pending: {ownerId: "1", chatId: "1", messageId: 8,
     requestedAt: Date.now(), bootId: "v071"}}));
   await fs.mkdir(path.join(f.root, "temp"), {recursive: true});
@@ -131,7 +140,26 @@ test("legacy id-less receipts accept a 0.7.1 result and release ownership even w
   await f.plugin.notifyReady();
   await waitFor(async () => (await f.receipts.read()).pending === null);
   assert.match(f.edits.at(-1)!.text, /更新成功/);
+  assert.match(f.edits.at(-1)!.text, /0\.7\.5<\/code> → <code>0\.7\.6/);
+  assert.match(f.edits.at(-1)!.text, /新增 &lt;摘要&gt;。/);
+  assert.doesNotMatch(f.edits.at(-1)!.text, /旧内容/);
   assert.ok(f.logs.includes("update.receipt_notification_failed"));
+});
+
+test("a successful no-op update reports that no code changed", async t => {
+  const f = await fixture(t, {activeState: "inactive"});
+  const requestId = "12345678-1234-4234-8234-123456789abc";
+  await f.receipts.update(() => ({pending: {ownerId: "1", chatId: "1", messageId: 14,
+    requestedAt: Date.now(), bootId: "previous", requestId}}));
+  await fs.mkdir(path.join(f.root, "temp"), {recursive: true});
+  await fs.writeFile(path.join(f.root, "temp/update-result.json"), JSON.stringify({
+    status: "success", reason: "", requestId, previousVersion: "0.7.6", currentVersion: "0.7.6",
+    previousRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+  }));
+  await f.plugin.notifyReady();
+  await waitFor(async () => (await f.receipts.read()).pending === null);
+  assert.match(f.edits.at(-1)!.text, /本次没有代码变更/);
+  assert.match(f.edits.at(-1)!.text, /0\.7\.6/);
 });
 
 test("legacy receipts ignore an older id-less result but accept a fresh 0.7.1 result", async t => {

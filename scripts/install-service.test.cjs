@@ -117,7 +117,13 @@ commands="$3"
 node() { "$node_binary" "$@"; }
 git() {
   printf 'git %s\\n' "$*" >> "$commands"
-  if [[ "$1" == rev-parse ]]; then printf '%s\\n' fixture-head; fi
+  if [[ "$1" == rev-parse ]]; then
+    if [[ -f .fixture-pulled ]]; then printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;
+    else printf '%s\\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi
+  elif [[ "$1" == pull ]]; then
+    printf '%s\\n' '{"name":"fixture","version":"0.7.6"}' > package.json
+    touch .fixture-pulled
+  fi
 }
 npm() {
   printf 'npm %s\\n' "$*" >> "$commands"
@@ -134,6 +140,7 @@ main "$@"
   if (rootOption) fs.mkdirSync(selected);
   const actualRoot = rootOption ? selected : root;
   fs.writeFileSync(path.join(actualRoot, 'package-lock.json'), '{"lockfileVersion":3}\n');
+  fs.writeFileSync(path.join(actualRoot, 'package.json'), '{"name":"fixture","version":"0.7.5"}\n');
   if (requestId) {
     fs.mkdirSync(path.join(actualRoot, 'temp'), {recursive: true});
     fs.writeFileSync(path.join(actualRoot, 'temp/update-request.json'), JSON.stringify({requestId}));
@@ -151,7 +158,8 @@ test('updater accepts an explicit deployment using named or positional paths', t
     assert.equal(result.status, 0, result.stderr);
     assert.ok(calls.startsWith(`git -C ${root} rev-parse --is-inside-work-tree\n`));
     assert.match(calls, /systemctl restart mibot.service/);
-    assert.deepEqual(receipt, {status: 'success', reason: ''});
+    assert.deepEqual(receipt, {status: 'success', reason: '', previousVersion: '0.7.5', currentVersion: '0.7.6',
+      previousRevision: 'a'.repeat(40), currentRevision: 'b'.repeat(40)});
   }
 });
 
@@ -169,7 +177,8 @@ test('updater detects a nested repository from its script and records successful
   assert.equal(result.status, 0, result.stderr);
   assert.ok(calls.startsWith(`git -C ${root} rev-parse --is-inside-work-tree\n`));
   assert.match(calls, /npm ci\nnpm run package:v2\nnpm run check:v2\nsystemctl restart mibot.service\n$/);
-  assert.deepEqual(receipt, {status: 'success', reason: ''});
+  assert.deepEqual(receipt, {status: 'success', reason: '', previousVersion: '0.7.5', currentVersion: '0.7.6',
+    previousRevision: 'a'.repeat(40), currentRevision: 'b'.repeat(40)});
 });
 
 test('updater preserves a failed step exit code and does not restart after failed build', t => {
@@ -184,7 +193,9 @@ test('updater carries the accepted request id into its atomic result', t => {
   const requestId = '12345678-1234-4234-8234-123456789abc';
   const {root, result, receipt} = updateFixture(t, '', '--root', requestId);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(receipt, {status: 'success', reason: '', requestId});
+  assert.deepEqual(receipt, {status: 'success', reason: '', requestId,
+    previousVersion: '0.7.5', currentVersion: '0.7.6', previousRevision: 'a'.repeat(40),
+    currentRevision: 'b'.repeat(40)});
   assert.equal(fs.existsSync(path.join(root, 'temp/update-request.json')), false);
   assert.equal(fs.readdirSync(path.join(root, 'temp')).some(name => name.startsWith('update-request.claim.')), false);
 });

@@ -5,13 +5,30 @@ umask 077
 write_result() {
   node -e '
 const fs = require("fs");
-const [status, reason, target, requestId] = process.argv.slice(1);
+const [status, reason, target, requestId, previousVersion, currentVersion,
+  previousRevision, currentRevision] = process.argv.slice(1);
 const result = {status, reason};
 if (requestId) result.requestId = requestId;
+const version = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
+const revision = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i;
+if (version.test(previousVersion)) result.previousVersion = previousVersion;
+if (version.test(currentVersion)) result.currentVersion = currentVersion;
+if (revision.test(previousRevision)) result.previousRevision = previousRevision;
+if (revision.test(currentRevision)) result.currentRevision = currentRevision;
 const temporary = `${target}.tmp.${process.pid}`;
 fs.writeFileSync(temporary, JSON.stringify(result), {encoding: "utf8", mode: 0o600});
 fs.renameSync(temporary, target);
-' "$1" "$2" "$result_file" "$request_id"
+' "$1" "$2" "$result_file" "$request_id" "$previous_version" "$current_version" \
+  "$previous_revision" "$current_revision"
+}
+
+read_version() {
+  node -e '
+const fs = require("fs");
+const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).version;
+if (typeof value !== "string" || !/^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/.test(value)) process.exit(1);
+process.stdout.write(value);
+' "$1"
 }
 
 run_step() {
@@ -59,6 +76,10 @@ main() {
   request_id=""
   status="failed"
   reason="更新服务异常退出"
+  previous_version=""
+  current_version=""
+  previous_revision=""
+  current_revision=""
   mkdir -p "$root/temp"
 
   acquire_update_lock
@@ -75,7 +96,11 @@ try {
   fi
   trap 'if [[ "$status" != "success" ]]; then write_result "$status" "$reason"; fi' EXIT
 
+  previous_version=$(read_version "$root/package.json" 2>/dev/null || true)
+  previous_revision=$(git rev-parse --verify HEAD 2>/dev/null || true)
   run_step "拉取代码" git pull --ff-only origin main
+  current_version=$(read_version "$root/package.json" 2>/dev/null || true)
+  current_revision=$(git rev-parse --verify HEAD 2>/dev/null || true)
   dependency_fingerprint=$(node -e '
 const fs = require("fs");
 const crypto = require("crypto");

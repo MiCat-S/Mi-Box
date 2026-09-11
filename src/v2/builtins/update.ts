@@ -14,10 +14,48 @@ const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
 type Receipt = {ownerId: string; chatId: string; messageId: number; requestedAt: number; bootId: string;
   requestId?: string};
 type UpdateState = {pending: Receipt | null};
-type UpdateResult = {status: "success" | "failed"; reason?: string | null; requestId?: string};
+type UpdateResult = {status: "success" | "failed"; reason?: string | null; requestId?: string;
+  previousVersion?: string; currentVersion?: string; previousRevision?: string; currentRevision?: string};
 interface UpdateRuntimeOptions {pollIntervalMs?: number; resultTimeoutMs?: number; startupGraceMs?: number; now?: () => number;}
 type ServiceStatusRow = {key: string; value: string};
 type ServiceStatusField = "LoadState" | "ActiveState" | "UnitFileState" | "SubState" | "CanStart" | "FragmentPath" | "Result";
+export interface ChangelogRelease {readonly version: string; readonly entries: readonly string[];}
+
+const VERSION_TOKEN = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/;
+const REVISION_TOKEN = /^[0-9a-f]{7,64}$/i;
+const CHANGELOG_REF = "https://github.com/MiCat-S/Mi-Box/blob/main/CHANGELOG.md";
+const UPDATE_NOTES_HTML_BUDGET = 2400;
+
+/** Select releases in changelog order, from the installed target back to but excluding the previous version. */
+export function selectChangelogReleases(
+  markdown: string,
+  previousVersion: string | undefined,
+  currentVersion: string | undefined,
+): readonly ChangelogRelease[] {
+  if (!currentVersion || previousVersion === currentVersion) return [];
+  const releases: {version: string; entries: string[]}[] = [];
+  let release: {version: string; entries: string[]} | undefined;
+  for (const line of markdown.split(/\r?\n/)) {
+    const heading = /^##\s+\[([^\]\r\n]+)\](?:\s|$)/.exec(line);
+    if (heading) {
+      release = {version: heading[1].trim(), entries: []};
+      releases.push(release);
+      continue;
+    }
+    const bullet = /^-\s+(.+)$/.exec(line);
+    if (release && bullet) release.entries.push(bullet[1].trim());
+  }
+  const currentIndex = releases.findIndex(item => item.version === currentVersion);
+  if (currentIndex < 0) return [];
+  const previousIndex = previousVersion === undefined
+    ? -1
+    : releases.findIndex(item => item.version === previousVersion);
+  const end = previousIndex > currentIndex ? previousIndex : currentIndex + 1;
+  return releases.slice(currentIndex, end).map(item => Object.freeze({
+    version: item.version,
+    entries: Object.freeze([...item.entries]),
+  }));
+}
 const statusFields: readonly ServiceStatusField[] = [
   "LoadState",
   "ActiveState",
@@ -113,6 +151,84 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+  const validVersion = (value: unknown): string | undefined =>
+    typeof value === "string" && VERSION_TOKEN.test(value) ? value : undefined;
+  const validRevision = (value: unknown): string | undefined =>
+    typeof value === "string" && REVISION_TOKEN.test(value) ? value : undefined;
+  const versionFromJson = (content: string): string | undefined => {
+    try { return validVersion((JSON.parse(content) as {version?: unknown}).version); }
+    catch { return undefined; }
+  };
+  const readInstalledVersion = async (): Promise<string | undefined> => {
+    try { return versionFromJson(await readFile(path.join(root, "package.json"), "utf8")); }
+    catch { return undefined; }
+  };
+  const gitText = async (ctx: PluginContext, args: readonly string[], maxOutputBytes = 4096): Promise<string> => {
+    const result = await ctx.processes.run("/usr/bin/git", ["-C", root, ...args], {timeoutMs: 30_000, maxOutputBytes});
+    return result.stdout.toString("utf8").trim();
+  };
+  const versionAt = async (ctx: PluginContext, revision: string): Promise<string | undefined> => {
+    try { return versionFromJson(await gitText(ctx, ["show", `${revision}:package.json`])); }
+    catch { return undefined; }
+  };
+  const renderReleaseNotes = (releases: readonly ChangelogRelease[]): string => {
+    if (!releases.some(release => release.entries.length)) return "";
+    const footer = `<a href="${CHANGELOG_REF}">查看完整更新记录</a>`;
+    const lines = ["<b>更新内容</b>"];
+    let omitted = false;
+    outer: for (const release of releases) {
+      if (!release.entries.length) continue;
+      const heading = `<b>${escapeHtml(release.version)}</b>`;
+      if ([...lines, heading, footer].join("\n").length > UPDATE_NOTES_HTML_BUDGET) {
+        omitted = true;
+        break;
+      }
+      lines.push(heading);
+      for (const entry of release.entries) {
+        const characters = [...entry];
+        const shortened = characters.length > 300 ? `${characters.slice(0, 300).join("")}…` : entry;
+        const bullet = `• ${escapeHtml(shortened)}`;
+        if ([...lines, bullet, footer].join("\n").length > UPDATE_NOTES_HTML_BUDGET) {
+          omitted = true;
+          break outer;
+        }
+        lines.push(bullet);
+      }
+    }
+    if (omitted && [...lines, "• …", footer].join("\n").length <= UPDATE_NOTES_HTML_BUDGET) lines.push("• …");
+    lines.push(footer);
+    return lines.join("\n");
+  };
+  const successfulUpdateDetails = async (ctx: PluginContext, result: Partial<UpdateResult>): Promise<string> => {
+    const currentVersion = validVersion(result.currentVersion) ?? await readInstalledVersion();
+    const previousVersion = validVersion(result.previousVersion) ?? await versionAt(ctx, "ORIG_HEAD");
+    const previousRevision = validRevision(result.previousRevision);
+    const currentRevision = validRevision(result.currentRevision);
+    if (previousRevision && currentRevision && previousRevision === currentRevision) {
+      return `当前已是最新版本，本次没有代码变更。${currentVersion
+        ? `\n版本：<code>${escapeHtml(currentVersion)}</code>` : ""}`;
+    }
+
+    const lines: string[] = [];
+    if (previousVersion && currentVersion && previousVersion !== currentVersion) {
+      lines.push(`版本：<code>${escapeHtml(previousVersion)}</code> → <code>${escapeHtml(currentVersion)}</code>`);
+    } else if (currentVersion) {
+      lines.push(`版本：<code>${escapeHtml(currentVersion)}</code>`);
+    }
+    if (previousRevision && currentRevision && previousRevision !== currentRevision &&
+        (!previousVersion || !currentVersion || previousVersion === currentVersion)) {
+      lines.push(`提交：<code>${previousRevision.slice(0, 12)}</code> → <code>${currentRevision.slice(0, 12)}</code>`);
+    }
+    let notes = "";
+    if (currentVersion && previousVersion !== currentVersion) {
+      try {
+        const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
+        notes = renderReleaseNotes(selectChangelogReleases(changelog, previousVersion, currentVersion));
+      } catch {}
+    }
+    if (notes) lines.push(notes);
+    return lines.join("\n\n");
+  };
   const processOwnerHint = (): string => {
     try {
       const uid = typeof process.getuid === "function" ? process.getuid() : NaN;
@@ -186,8 +302,11 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     "<code>systemctl status mibot-update.service --no-pager</code>\n" +
     "<code>journalctl -u mibot-update.service -n 80 --no-pager</code>",
   );
-  const finalText = (result: Partial<UpdateResult>): string => {
-    if (result.status === "success") return brandText("<b>MiBot 更新成功</b>\n主程序更新完成，服务已重启。");
+  const finalText = async (ctx: PluginContext, result: Partial<UpdateResult>): Promise<string> => {
+    if (result.status === "success") {
+      const details = await successfulUpdateDetails(ctx, result);
+      return brandText("<b>MiBot 更新成功</b>\n主程序更新完成，服务已重启。") + (details ? `\n\n${details}` : "");
+    }
     const detail = formatUpdateResult(result);
     return brandText(`<b>MiBot 更新失败</b>\n更新未完成，请查看 <code>.update check</code> 或服务器日志。${
       detail ? `\n原因：${escapeHtml(detail)}` : ""}`);
@@ -208,11 +327,15 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       if (!owned) return;
       const result = await readMatchingResult(receipt);
       if (result?.status === "failed") {
-        await exclusive(() => finalizeReceipt(ctx, receipt, finalText(result)));
+        const text = await finalText(ctx, result);
+        await exclusive(() => finalizeReceipt(ctx, receipt, text));
         return;
       }
       if (result?.status === "success") {
-        if (mode === "recovery") await exclusive(() => finalizeReceipt(ctx, receipt, finalText(result)));
+        if (mode === "recovery") {
+          const text = await finalText(ctx, result);
+          await exclusive(() => finalizeReceipt(ctx, receipt, text));
+        }
         else {
           // Success is written after mibot.service restarts; the next boot owns final notification and clearing.
           try {
@@ -266,7 +389,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
   };
 
   const authorizeOwner = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
-    if (isOwnerOrGroupSendAs(invocation.message, ownerId)) return true;
+    if (!invocation.message.forwarded && isOwnerOrGroupSendAs(invocation.message, ownerId)) return true;
     await ctx.telegram.edit(invocation.message, brandText("只有账号所有者可以更新 MiBot", false));
     return false;
   };
@@ -299,9 +422,46 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
 
   const checkUpdate = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
     if (!await rootCheck(invocation, ctx)) return;
-    const result = await ctx.processes.run("/usr/bin/git", ["-C", root, "fetch", "origin", "main"], {timeoutMs: 30000, maxOutputBytes: 4000});
-    await ctx.telegram.edit(invocation.message,
-      `<b>更新检查完成</b>\n<pre>${escapeHtml(result.stdout.toString("utf8").slice(0, 3000))}</pre>`, htmlOptions);
+    try {
+      await gitText(ctx, ["fetch", "origin", "main"]);
+      const counts = await gitText(ctx, ["rev-list", "--left-right", "--count", "HEAD...refs/remotes/origin/main"], 256);
+      const match = /^(\d+)\s+(\d+)$/.exec(counts);
+      if (!match) throw new Error("Unexpected Git comparison output");
+      const ahead = Number(match[1]);
+      const behind = Number(match[2]);
+      const currentVersion = await readInstalledVersion();
+      if (ahead > 0) {
+        const state = behind > 0
+          ? `本地与远端分支已分叉（本地 ${ahead} 个、远端 ${behind} 个提交）。`
+          : `本地分支包含 ${ahead} 个尚未推送的提交。`;
+        await ctx.telegram.edit(invocation.message,
+          `<b>更新检查完成</b>\n${state}\n当前无法执行快速更新，请先整理部署分支。`, htmlOptions);
+        return;
+      }
+      if (behind === 0) {
+        await ctx.telegram.edit(invocation.message,
+          `<b>更新检查完成</b>\n当前版本：<code>${escapeHtml(currentVersion ?? "未知")}</code>\n状态：当前已是最新版本。`,
+        htmlOptions);
+        return;
+      }
+      const remoteVersion = await versionAt(ctx, "refs/remotes/origin/main");
+      let notes = "";
+      if (remoteVersion && currentVersion !== remoteVersion) {
+        try {
+          const changelog = await gitText(ctx, ["show", "refs/remotes/origin/main:CHANGELOG.md"], 256 * 1024);
+          notes = renderReleaseNotes(selectChangelogReleases(changelog, currentVersion, remoteVersion));
+        } catch {}
+      }
+      const version = currentVersion && remoteVersion && currentVersion !== remoteVersion
+        ? `可更新：<code>${escapeHtml(currentVersion)}</code> → <code>${escapeHtml(remoteVersion)}</code>`
+        : `远端有 ${behind} 个待更新提交${currentVersion ? `；当前版本：<code>${escapeHtml(currentVersion)}</code>` : ""}`;
+      await ctx.telegram.edit(invocation.message,
+        `<b>发现主程序更新</b>\n${version}\n待更新提交：${behind}${notes ? `\n\n${notes}` : ""}`, htmlOptions);
+    } catch (error) {
+      ctx.log.error("update.check_failed", {kind: error instanceof Error ? error.name : "unknown"});
+      await ctx.telegram.edit(invocation.message,
+        brandText("<b>MiBot 更新检查失败</b>\n无法读取远端版本信息，请确认网络和 Git 仓库状态后重试。"), htmlOptions);
+    }
   };
 
   const runUpdate = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
@@ -334,7 +494,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     const existing = (await store(ctx).read()).pending;
     if (existing && validReceipt(existing)) {
       const result = await readMatchingResult(existing);
-      if (result) await finalizeReceipt(ctx, existing, finalText(result));
+      if (result) await finalizeReceipt(ctx, existing, await finalText(ctx, result));
       else if (serviceEnded(activeState)) await finalizeReceipt(ctx, existing, missingResultText());
     } else if (existing) {
       await clear(ctx, existing);
@@ -383,6 +543,9 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
 
   const updateCommand: CommandDefinition = {
     description: "查看版本与自动更新状态",
+    direction: "outgoing",
+    includeSaved: true,
+    ignoreForwarded: true,
     helpArgs: ["help", "h"],
     defaultSubcommand: "run",
     subcommands: {

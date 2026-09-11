@@ -3,7 +3,7 @@ import test from "node:test";
 import {Api} from "teleproto";
 import {returnBigInt} from "teleproto/Helpers";
 import {messageEnvelope} from "../telegram";
-import createUpdate from "./update";
+import createUpdate, {selectChangelogReleases} from "./update";
 import type {CommandInvocation, MessageEnvelope, PluginContext} from "../sdk";
 
 type RunResult = {stdout?: string; stderr?: string; exitCode?: number; error?: unknown};
@@ -94,14 +94,41 @@ test("非所有者无法发起更新", async (t) => {
 });
 
 test("本账号以频道皮套发送的更新命令通过身份检查", async t => {
-  const f = fixture();
+  const f = fixture([
+    {},
+    {stdout: "0 2"},
+    {stdout: '{"version":"0.7.6"}'},
+    {stdout: "# Changelog\n\n## [0.7.6] - 2026-09-11\n\n- 展示更新内容。\n"},
+  ]);
   t.after(f.restore);
   Object.defineProperty(process, "getuid", {value: () => 0, configurable: true});
   const envelope = channelMessage();
   assert.equal(envelope.senderId, "-100789");
   await createUpdate("/fixture", "123").commands.update.handle({...f.inv, args: ["check"], message: envelope}, f.ctx);
-  assert.deepEqual(f.calls, [["/usr/bin/git", "-C", "/fixture", "fetch", "origin", "main"]]);
-  assert.match(f.edits.at(-1)!, /更新检查完成/);
+  assert.deepEqual(f.calls, [
+    ["/usr/bin/git", "-C", "/fixture", "fetch", "origin", "main"],
+    ["/usr/bin/git", "-C", "/fixture", "rev-list", "--left-right", "--count", "HEAD...refs/remotes/origin/main"],
+    ["/usr/bin/git", "-C", "/fixture", "show", "refs/remotes/origin/main:package.json"],
+    ["/usr/bin/git", "-C", "/fixture", "show", "refs/remotes/origin/main:CHANGELOG.md"],
+  ]);
+  assert.match(f.edits.at(-1)!, /发现主程序更新/);
+  assert.match(f.edits.at(-1)!, /展示更新内容/);
+});
+
+test("更新说明按目标版本到原版本之间的发布顺序选择", () => {
+  const markdown = [
+    "# Changelog", "", "## [0.7.7] - 2026-09-12", "", "- newer", "",
+    "## [0.7.6] - 2026-09-11", "", "- first", "- second", "",
+    "## [0.7.5] - 2026-09-10", "", "- old",
+  ].join("\n");
+  assert.deepEqual(selectChangelogReleases(markdown, "0.7.5", "0.7.7"), [
+    {version: "0.7.7", entries: ["newer"]},
+    {version: "0.7.6", entries: ["first", "second"]},
+  ]);
+  assert.deepEqual(selectChangelogReleases(markdown, "0.7.7", "0.7.7"), []);
+  assert.deepEqual(selectChangelogReleases(markdown, "missing", "0.7.6"), [
+    {version: "0.7.6", entries: ["first", "second"]},
+  ]);
 });
 
 test("皮套身份支持默认更新与 now 命令", async t => {
@@ -131,6 +158,17 @@ test("他人频道消息、转发与缺失所有者配置不能通过皮套更�
     await createUpdate(undefined, owner).commands.update.handle({...f.inv, message}, f.ctx);
     assert.match(f.edits.at(-1)!, /只有账号所有者/);
   }
+  assert.equal(f.calls.length, 0);
+});
+
+test("账号本人转发的私聊消息不能触发更新", async t => {
+  const f = fixture();
+  t.after(f.restore);
+  Object.defineProperty(process, "getuid", {value: () => 0, configurable: true});
+  await createUpdate("/fixture", "123").commands.update.handle({
+    ...f.inv, message: {...f.inv.message, forwarded: true},
+  }, f.ctx);
+  assert.match(f.edits.at(-1)!, /只有账号所有者/);
   assert.equal(f.calls.length, 0);
 });
 
