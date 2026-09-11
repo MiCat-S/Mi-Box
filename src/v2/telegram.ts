@@ -109,7 +109,15 @@ export function messageEnvelope(message: Api.Message, options: EnvelopeOptions =
   const chatId = peerId(message.peerId);
   const reply = replyHeader(message);
   const savedPeer = (message as Api.Message & { savedPeerId?: Api.TypePeer }).savedPeerId;
-  const senderId = message.fromId ? peerId(message.fromId)
+  // An outgoing private message always originates from the authenticated account, so an
+  // injected selfId is authoritative. Telegram may omit fromId or expose a peer-shaped
+  // senderId for own messages; trusting those first would misreport the peer as the
+  // operator. This only affects outgoing PeerUser messages: incoming private, broadcast
+  // posts and channel send-as keep their existing sender resolution and admission rules.
+  const authenticatedSelf = options.selfId !== undefined && message.out === true &&
+    message.peerId.className === "PeerUser";
+  const senderId = authenticatedSelf ? options.selfId
+    : message.fromId ? peerId(message.fromId)
     : message.senderId?.toString() ??
       ((message.post || (!message.out && message.peerId.className === "PeerUser")) ? chatId
         : message.out ? options.selfId : undefined);

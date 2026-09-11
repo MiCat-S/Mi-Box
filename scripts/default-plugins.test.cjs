@@ -83,7 +83,7 @@ test('runtime loads only the requested default builtins', async () => {
           : ts.isIdentifier(argument) ? variables.get(argument.text) : undefined;
         if (factory?.startsWith('create')) {
           builtins.push(factory.slice('create'.length).toLowerCase());
-          if (ts.isCallExpression(argument) && ['createExec', 'createBf', 'createSudo'].includes(factory)) {
+          if (ts.isCallExpression(argument) && ['createExec', 'createBf', 'createSudo', 'createLogLevel'].includes(factory)) {
             ownerArguments.set(factory, argument.arguments.map(value => value.getText(source)));
           }
         }
@@ -94,7 +94,7 @@ test('runtime loads only the requested default builtins', async () => {
     assert.deepEqual(builtins.sort(), ['agent', 'alias', 'autofix', 'bf', 'env', 'exec', 'help', 'loglevel',
       'memory', 'ping', 'prefix', 'privacy', 'restart', 'status', 'sudo', 'sysinfo', 'tpm', 'update', 'version'].sort());
     assert.deepEqual(Object.fromEntries(ownerArguments), {
-      createExec: ['selfId'], createBf: ['root', 'selfId'], createSudo: ['selfId'],
+      createExec: ['selfId'], createBf: ['root', 'selfId'], createSudo: ['selfId'], createLogLevel: ['logger', 'selfId'],
     });
   } finally {
     api.close();

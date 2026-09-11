@@ -136,7 +136,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     await host.load(createHelp(host, selfId));
     await host.load(createAlias(host));
     await host.load(createPrefix(host, new PrefixEnvStore(path.join(root, ".env"))));
-    await host.load(createLogLevel(logger));
+    await host.load(createLogLevel(logger, selfId));
     await host.load(createMemory());
     await host.load(createPing());
     await host.load(createStatus(root));

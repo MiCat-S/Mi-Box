@@ -197,6 +197,28 @@ test("missing sender IDs use only local peer and supplied account identity", () 
   assert.equal(messageEnvelope(post).senderId, getPeerId(post.peerId));
 });
 
+test("outgoing private identity trusts the authenticated self over peer-shaped sender fields", () => {
+  const peer = new Api.PeerUser({ userId: returnBigInt(LARGE) });
+  // Telegram may return own private messages whose fromId resolves to the peer; without
+  // selfId precedence the owner check sees the peer and rejects the operator.
+  const misTagged = message({ peerId: peer, fromId: peer, out: true });
+  assert.equal(messageEnvelope(misTagged, { selfId: SELF }).senderId, SELF);
+  // Some decodes expose a peer-derived senderId even when fromId is absent.
+  const decoded = message({ peerId: peer, fromId: undefined, out: true });
+  Object.defineProperty(decoded, "senderId", { value: returnBigInt(getPeerId(peer)), configurable: true });
+  assert.equal(messageEnvelope(decoded, { selfId: SELF }).senderId, SELF);
+  // The fix never widens incoming private messages or unaudited envelopes.
+  const incoming = message({ peerId: peer, fromId: undefined, out: false });
+  assert.equal(messageEnvelope(incoming, { selfId: SELF }).senderId, getPeerId(peer));
+  assert.equal(messageEnvelope(decoded).senderId, getPeerId(peer));
+  // Channel send-as and broadcast posts keep their existing sender resolution.
+  const channel = new Api.PeerChannel({ channelId: returnBigInt(LARGE) });
+  const sendAs = message({ peerId: channel, fromId: channel, out: true });
+  assert.equal(messageEnvelope(sendAs, { selfId: SELF }).senderId, getPeerId(channel));
+  const post = message({ fromId: undefined, post: true });
+  assert.equal(messageEnvelope(post, { selfId: SELF }).senderId, getPeerId(post.peerId));
+});
+
 test("forum topic roots, nested replies and ordinary replies keep distinct IDs", () => {
   const nested = messageEnvelope(message({ replyTo: new Api.MessageReplyHeader({
     forumTopic: true, replyToMsgId: 90, replyToTopId: 20,
