@@ -2,7 +2,7 @@ import {bold} from "../ui/text";
 import {brandText} from "../branding";
 import {STRUCTURED_PLUGIN_API_VERSION, definePlugin, type CommandDefinition, type CommandInvocation, type PluginContext} from "../sdk";
 import {randomUUID} from "node:crypto";
-import {readFile, unlink} from "node:fs/promises";
+import {mkdir, open, readFile, rename, unlink, writeFile} from "node:fs/promises";
 import {setTimeout as delay} from "node:timers/promises";
 import path from "node:path";
 import {isOwnerOrGroupSendAs} from "../permissions";
@@ -11,9 +11,11 @@ import {renderCommandHelp} from "../commands";
 
 const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
 
-type Receipt = {ownerId: string; chatId: string; messageId: number; requestedAt: number; bootId: string};
+type Receipt = {ownerId: string; chatId: string; messageId: number; requestedAt: number; bootId: string;
+  requestId?: string};
 type UpdateState = {pending: Receipt | null};
-type UpdateResult = {status: "success" | "failed"; reason?: string | null};
+type UpdateResult = {status: "success" | "failed"; reason?: string | null; requestId?: string};
+interface UpdateRuntimeOptions {pollIntervalMs?: number; resultTimeoutMs?: number; startupGraceMs?: number; now?: () => number;}
 type ServiceStatusRow = {key: string; value: string};
 type ServiceStatusField = "LoadState" | "ActiveState" | "UnitFileState" | "SubState" | "CanStart" | "FragmentPath" | "Result";
 const statusFields: readonly ServiceStatusField[] = [
@@ -26,16 +28,32 @@ const statusFields: readonly ServiceStatusField[] = [
   "Result",
 ];
 
-export default function createUpdate(root = process.cwd(), ownerId?: string) {
+export default function createUpdate(root = process.cwd(), ownerId?: string, options: UpdateRuntimeOptions = {}) {
   const bootId = randomUUID();
   let context: PluginContext | undefined;
-  let submitted = false;
+  let recoveryStarted = false;
+  let stateOperation: Promise<void> = Promise.resolve();
   const updateService = "mibot-update.service";
+  const pollIntervalMs = options.pollIntervalMs ?? 1000;
+  const resultTimeoutMs = options.resultTimeoutMs ?? 10 * 60_000;
+  const startupGraceMs = options.startupGraceMs ?? 5000;
+  // Legacy 0.7.1 results have no request ID, so use their file time to reject pre-existing output.
+  const legacyResultClockToleranceMs = 1000;
+  const now = options.now ?? Date.now;
+  const exclusive = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = stateOperation.then(operation, operation);
+    stateOperation = result.then(() => undefined, () => undefined);
+    return result;
+  };
   const store = (ctx: PluginContext) => ctx.storage.json<UpdateState>("update-receipt.json", {pending: null});
   const resultFile = path.join(root, "temp", "update-result.json");
+  const requestFile = path.join(root, "temp", "update-request.json");
+  const sameReceipt = (current: Receipt | null, expected: Receipt): boolean => !!current &&
+    (expected.requestId !== undefined
+      ? current.requestId === expected.requestId
+      : current.requestId === undefined && current.bootId === expected.bootId && current.requestedAt === expected.requestedAt);
   const clear = (ctx: PluginContext, receipt: Receipt) => store(ctx).update(state =>
-    state.pending?.bootId === receipt.bootId && state.pending.requestedAt === receipt.requestedAt
-      ? {pending: null} : state);
+    sameReceipt(state.pending, receipt) ? {pending: null} : state);
   const readServiceStatusRows = async (ctx: PluginContext, fields = statusFields): Promise<ServiceStatusRow[]> => {
     const rows: ServiceStatusRow[] = [];
     for (const field of fields) {
@@ -65,6 +83,9 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
     }
     if (statusMap.FragmentPath === "unavailable" || !statusMap.FragmentPath) {
       return "未检测到更新服务文件路径，请检查 `/etc/systemd/system/mibot-update.service` 是否存在。";
+    }
+    if (statusMap.ActiveState === "unavailable" || statusMap.ActiveState === "unknown") {
+      return "无法确认更新服务是否正在执行，请检查 systemd 状态后重试。";
     }
     return "";
   };
@@ -120,36 +141,128 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
       return "";
     }
   };
-  const reportFailure = async (ctx: PluginContext, receipt: Receipt, text: string): Promise<void> => {
-    await ctx.telegram.edit({id: receipt.messageId, chatId: receipt.chatId, text: "", outgoing: true}, text, htmlOptions);
-    await clear(ctx, receipt);
-    try { await unlink(resultFile); } catch {}
+  const validReceipt = (receipt: Receipt): boolean => {
+    const age = now() - receipt.requestedAt;
+    return receipt.ownerId === ownerId && /^-?[0-9]+$/.test(receipt.chatId) &&
+      Number.isSafeInteger(receipt.messageId) && receipt.messageId > 0 && Number.isFinite(age) && age >= 0 &&
+      (receipt.requestId === undefined || /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(receipt.requestId));
   };
-  const watchResult = (ctx: PluginContext, receipt: Receipt): void => {
-    void ctx.tasks.run("update:result", async signal => {
-      let pending = true;
-      for (let attempt = 0; attempt < 300; attempt += 1) {
-        signal.throwIfAborted();
-        try {
-          const result = JSON.parse(await readFile(resultFile, "utf8")) as Partial<UpdateResult>;
-      if (result.status === "failed") {
-            const detail = formatUpdateResult(result);
-            await reportFailure(ctx, receipt,
-              brandText(`<b>MiBot 更新失败</b>\n更新任务未完成，服务保持当前版本。请稍后重试或查看服务器日志。${detail ? `\n原因：${escapeHtml(detail)}` : ""}`));
-            return;
+  const resultMatches = (receipt: Receipt, result: Partial<UpdateResult>, modifiedAt: number): boolean =>
+    receipt.requestId === undefined
+      ? result.requestId === undefined && modifiedAt >= receipt.requestedAt - legacyResultClockToleranceMs
+      : result.requestId === receipt.requestId;
+  const readMatchingResult = async (receipt: Receipt): Promise<Partial<UpdateResult> | undefined> => {
+    try {
+      const handle = await open(resultFile, "r");
+      try {
+        const metadata = await handle.stat();
+        const result = JSON.parse(await handle.readFile("utf8")) as Partial<UpdateResult>;
+        if ((result.status === "success" || result.status === "failed") && resultMatches(receipt, result, metadata.mtimeMs)) return result;
+      } finally {
+        await handle.close();
+      }
+    } catch {}
+  };
+  const editReceipt = (ctx: PluginContext, receipt: Receipt, text: string) =>
+    ctx.telegram.edit({id: receipt.messageId, chatId: receipt.chatId, text: "", outgoing: true}, text, htmlOptions);
+  const finalizeReceipt = async (ctx: PluginContext, receipt: Receipt, text: string): Promise<boolean> => {
+    if (!sameReceipt((await store(ctx).read()).pending, receipt)) return false;
+    try {
+      await editReceipt(ctx, receipt, text);
+    } catch {
+      if (!ctx.signal.aborted) ctx.log.error("update.receipt_notification_failed");
+    } finally {
+      await clear(ctx, receipt);
+    }
+    return true;
+  };
+  const missingResultText = () => brandText(
+    "<b>MiBot 更新失败</b>\n更新任务已结束但未返回对应结果，请查看日志：\n" +
+    "<code>systemctl status mibot-update.service --no-pager</code>\n" +
+    "<code>journalctl -u mibot-update.service -n 80 --no-pager</code>\n稍后可重新执行 <code>.update</code>。",
+  );
+  const unknownResultText = () => brandText(
+    "<b>MiBot 更新</b>\n更新任务未返回对应结果，且无法确认更新服务状态。已释放本次回执；请先检查：\n" +
+    "<code>systemctl status mibot-update.service --no-pager</code>\n" +
+    "<code>journalctl -u mibot-update.service -n 80 --no-pager</code>",
+  );
+  const finalText = (result: Partial<UpdateResult>): string => {
+    if (result.status === "success") return brandText("<b>MiBot 更新成功</b>\n主程序更新完成，服务已重启。");
+    const detail = formatUpdateResult(result);
+    return brandText(`<b>MiBot 更新失败</b>\n更新未完成，请查看 <code>.update check</code> 或服务器日志。${
+      detail ? `\n原因：${escapeHtml(detail)}` : ""}`);
+  };
+  const serviceState = async (ctx: PluginContext): Promise<string> => {
+    const [row] = await readServiceStatusRows(ctx, ["ActiveState"]);
+    return row?.value ?? "unavailable";
+  };
+  const serviceBusy = (state: string): boolean => ["active", "activating", "reloading", "deactivating"].includes(state);
+  const serviceEnded = (state: string): boolean => ["inactive", "failed"].includes(state);
+
+  const observeReceipt = async (ctx: PluginContext, receipt: Receipt, mode: "current" | "recovery", signal: AbortSignal): Promise<void> => {
+    const startedAt = now();
+    const deadline = receipt.requestedAt + resultTimeoutMs;
+    while (true) {
+      signal.throwIfAborted();
+      const owned = await exclusive(async () => sameReceipt((await store(ctx).read()).pending, receipt));
+      if (!owned) return;
+      const result = await readMatchingResult(receipt);
+      if (result?.status === "failed") {
+        await exclusive(() => finalizeReceipt(ctx, receipt, finalText(result)));
+        return;
+      }
+      if (result?.status === "success") {
+        if (mode === "recovery") await exclusive(() => finalizeReceipt(ctx, receipt, finalText(result)));
+        else {
+          // Success is written after mibot.service restarts; the next boot owns final notification and clearing.
+          try {
+            await editReceipt(ctx, receipt, brandText(
+              "<b>MiBot 更新提交成功</b>\n更新服务已接收任务，服务重建中，请稍候执行 <code>.update</code> 查看结果。"));
+          } catch {
+            if (!ctx.signal.aborted) ctx.log.error("update.receipt_notification_failed");
           }
-          if (result.status === "success") { pending = false; await ctx.telegram.edit({id: receipt.messageId, chatId: receipt.chatId, text: "", outgoing: true},
-            brandText("<b>MiBot 更新提交成功</b>\n更新服务已接收任务，服务重建中，请稍候执行 <code>.update</code> 查看结果。"), htmlOptions);
-            return; }
-        } catch {}
-        await delay(1000, undefined, {signal});
+        }
+        return;
       }
-      if (pending && !signal.aborted) {
-        pending = false;
-        await reportFailure(ctx, receipt,
-          brandText("<b>MiBot 更新失败</b>\n更新任务已提交但未返回结果，请稍候查看日志：\n<code>systemctl status mibot-update.service --no-pager</code>\n<code>journalctl -u mibot-update.service -n 80 --no-pager</code>\n任务可在稍后执行 <code>.update</code> 重试检查。"));
+      const active = await serviceState(ctx);
+      if (serviceEnded(active) && (mode === "recovery" || now() - startedAt >= startupGraceMs)) {
+        await exclusive(() => finalizeReceipt(ctx, receipt, missingResultText()));
+        return;
       }
+      if (!serviceBusy(active) && now() >= deadline) {
+        await exclusive(() => finalizeReceipt(ctx, receipt, unknownResultText()));
+        return;
+      }
+      await delay(pollIntervalMs, undefined, {signal});
+    }
+  };
+  const startObserver = (ctx: PluginContext, receipt: Receipt, mode: "current" | "recovery"): void => {
+    const watching = ctx.tasks.run(mode === "current" ? "update:result" : "update:recovery",
+      signal => observeReceipt(ctx, receipt, mode, signal));
+    void watching.catch(() => { if (!ctx.signal.aborted) ctx.log.error("update.receipt_failed"); });
+  };
+  const startRecovery = (ctx: PluginContext): void => {
+    const watching = ctx.tasks.run("update:recovery", async signal => {
+      const pending = await exclusive(async () => (await store(ctx).read()).pending);
+      if (!pending || pending.bootId === bootId) return;
+      if (!validReceipt(pending)) {
+        await exclusive(async () => { await clear(ctx, pending); });
+        return;
+      }
+      await observeReceipt(ctx, pending, "recovery", signal);
     });
+    void watching.catch(() => { if (!ctx.signal.aborted) ctx.log.error("update.receipt_failed"); });
+  };
+  const writeRequest = async (receipt: Receipt): Promise<void> => {
+    await mkdir(path.dirname(requestFile), {recursive: true});
+    const temporary = `${requestFile}.${receipt.requestId}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify({requestId: receipt.requestId}), {encoding: "utf8", mode: 0o600});
+      await rename(temporary, requestFile);
+    } catch (error) {
+      try { await unlink(temporary); } catch {}
+      throw error;
+    }
   };
 
   const authorizeOwner = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
@@ -193,28 +306,54 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
 
   const runUpdate = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
     if (!await rootCheck(invocation, ctx)) return;
+    await exclusive(async () => {
+    ctx.signal.throwIfAborted();
     const receipt: Receipt = {ownerId: ownerId ?? "", chatId: invocation.message.chatId,
-      messageId: invocation.message.id, requestedAt: Date.now(), bootId};
-    const {pending} = await store(ctx).read();
-    if (pending) {
+      messageId: invocation.message.id, requestedAt: now(), bootId, requestId: randomUUID()};
+    const statusRows = await readServiceStatusRows(ctx);
+    const status = statusRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
+    const hint = serviceStatusHint(statusRows);
+    if (hint) {
+      await ctx.telegram.edit(invocation.message,
+        brandText(`<b>MiBot 更新失败</b>\n${hint}\n`) +
+        `服务检查结果：${status}\n\n请先执行：<code>bash scripts/install-service.sh</code> 或确认服务文件是否存在。\n` +
+        escapeHtml(processOwnerHint()), htmlOptions);
+      return;
+    }
+    const activeState = parseServiceStatusMap(statusRows).ActiveState ?? "unavailable";
+    if (serviceBusy(activeState)) {
       await ctx.telegram.edit(invocation.message,
         brandText("<b>MiBot 更新</b>\n已有更新任务进行中，请稍后查看结果或稍后重试。"), htmlOptions);
       return;
     }
-    await ctx.telegram.edit(invocation.message, brandText("<b>MiBot 更新</b>\n正在更新主程序、检查依赖并重建运行时…"), htmlOptions);
-    await store(ctx).update(() => ({pending: receipt}));
+    if (!serviceEnded(activeState)) {
+      await ctx.telegram.edit(invocation.message,
+        brandText("<b>MiBot 更新</b>\n无法确认更新服务已结束，请检查 systemd 状态后重试。"), htmlOptions);
+      return;
+    }
+    const existing = (await store(ctx).read()).pending;
+    if (existing && validReceipt(existing)) {
+      const result = await readMatchingResult(existing);
+      if (result) await finalizeReceipt(ctx, existing, finalText(result));
+      else if (serviceEnded(activeState)) await finalizeReceipt(ctx, existing, missingResultText());
+    } else if (existing) {
+      await clear(ctx, existing);
+    }
+    let acquired = false;
+    await store(ctx).update(state => {
+      if (state.pending) return state;
+      acquired = true;
+      return {pending: receipt};
+    });
+    if (!acquired) {
+      await ctx.telegram.edit(invocation.message,
+        brandText("<b>MiBot 更新</b>\n已有更新任务进行中，请稍后查看结果或稍后重试。"), htmlOptions);
+      return;
+    }
     try {
-      const statusRows = await readServiceStatusRows(ctx);
-      const status = statusRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
-      const hint = serviceStatusHint(statusRows);
-      if (hint) {
-        submitted = false;
-        await reportFailure(ctx, receipt,
-          brandText(`<b>MiBot 更新失败</b>\n${hint}\n`) +
-          `服务检查结果：${status}\n\n请先执行：<code>bash scripts/install-service.sh</code> 或确认服务文件是否存在。\n` +
-          escapeHtml(processOwnerHint()));
-        return;
-      }
+      await ctx.telegram.edit(invocation.message,
+        brandText("<b>MiBot 更新</b>\n正在更新主程序、检查依赖并重建运行时…"), htmlOptions);
+      await writeRequest(receipt);
       if (statusRows.some(({key, value}) => key === "ActiveState" && value === "failed")) {
         await ctx.processes.run("/usr/bin/systemctl", ["reset-failed", updateService], {timeoutMs: 5000, maxOutputBytes: 2000});
       }
@@ -224,24 +363,22 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
       const startupRows = await readServiceStatusRows(ctx, ["LoadState", "ActiveState", "Result", "SubState", "FragmentPath"]);
       const startupHint = serviceStartupFailureHint(startupRows);
       if (startupHint) {
-        submitted = false;
         const failureStatus = startupRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
-        await reportFailure(ctx, receipt,
+        await finalizeReceipt(ctx, receipt,
           brandText(`<b>MiBot 更新失败</b>\n${startupHint}\n`) +
           `服务检查结果：${failureStatus}\n\n请查看服务日志：\n<code>journalctl -u ${updateService} -n 80 --no-pager</code>`);
         return;
       }
-      submitted = true;
     } catch (error) {
-      submitted = false;
       const logs = await readServiceLog(ctx);
       const status = await readServiceStatus(ctx);
-      await reportFailure(ctx, receipt,
+      await finalizeReceipt(ctx, receipt,
         brandText(`<b>MiBot 更新失败</b>\n启动更新任务失败：${escapeHtml(summarizeProcessError(error))}\n\n服务状态：${status}\n\n请检查服务文件与权限：\n<code>systemctl status ${updateService} --no-pager</code>\n<code>journalctl -u ${updateService} -n 80 --no-pager</code>\n<code>systemctl show ${updateService}</code>\n`) +
         `${escapeHtml(processOwnerHint())}${logs}`);
       return;
     }
-    watchResult(ctx, receipt);
+    startObserver(ctx, receipt, "current");
+    });
   };
 
   const updateCommand: CommandDefinition = {
@@ -323,52 +460,8 @@ export default function createUpdate(root = process.cwd(), ownerId?: string) {
   });
   return Object.freeze({...definition, async notifyReady(): Promise<void> {
     const ctx = context;
-    if (!ctx || submitted) return;
-    try {
-      const {pending} = await store(ctx).read();
-      if (!pending || pending.bootId === bootId) return;
-      const age = Date.now() - pending.requestedAt;
-      if (pending.ownerId !== ownerId || !/^-?[0-9]+$/.test(pending.chatId) ||
-          !Number.isSafeInteger(pending.messageId) || pending.messageId <= 0 ||
-          !Number.isFinite(age) || age < 0 || age > 10 * 60_000) {
-        await clear(ctx, pending);
-        return;
-      }
-      let status: "success" | "failed" | undefined;
-      let reason: string | null = null;
-      try {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
-          try {
-            const result = JSON.parse(await readFile(resultFile, "utf8")) as Partial<UpdateResult>;
-            if (result.status === "success" || result.status === "failed") {
-              status = result.status;
-              reason = typeof result.reason === "string" ? result.reason.trim() : null;
-              break;
-            }
-          } catch {}
-          await delay(1000);
-        }
-      } catch {}
-      if (!status) {
-        if (age > 1 * 60_000) {
-          await ctx.telegram.edit({id: pending.messageId, chatId: pending.chatId, text: "", outgoing: true},
-            brandText("<b>MiBot 更新</b>\n更新服务已启动但未产生日志结果，请检查：\n<code>systemctl status mibot-update.service --no-pager</code>\n<code>journalctl -u mibot-update.service -n 80 --no-pager</code>\n稍后可重试 <code>.update</code>。"), htmlOptions);
-          await clear(ctx, pending);
-          try { await unlink(resultFile); } catch {}
-        }
-        return;
-      }
-      if (status === "success" || status === "failed") {
-        await ctx.telegram.edit({id: pending.messageId, chatId: pending.chatId, text: "", outgoing: true},
-          status === "success"
-            ? brandText("<b>MiBot 更新成功</b>\n主程序更新完成，服务已重启。")
-            : brandText(`<b>MiBot 更新失败</b>\n服务保持当前版本。请查看 <code>.update check</code> 或服务器日志。${reason ? `\n原因：${escapeHtml(reason)}` : ""}`),
-          htmlOptions);
-        await clear(ctx, pending);
-        try { await unlink(resultFile); } catch {}
-      }
-    } catch {
-      if (!ctx.signal.aborted) ctx.log.error("update.receipt_failed");
-    }
+    if (!ctx || recoveryStarted) return;
+    recoveryStarted = true;
+    startRecovery(ctx);
   }});
 }

@@ -72,6 +72,7 @@ test('runtime loads only the requested default builtins', async () => {
     };
     visitVariables(source);
     const builtins = [];
+    const ownerArguments = new Map();
     const visitLoads = node => {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
         && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'host'
@@ -80,13 +81,21 @@ test('runtime loads only the requested default builtins', async () => {
         const factory = ts.isCallExpression(argument) && ts.isIdentifier(argument.expression)
           ? argument.expression.text
           : ts.isIdentifier(argument) ? variables.get(argument.text) : undefined;
-        if (factory?.startsWith('create')) builtins.push(factory.slice('create'.length).toLowerCase());
+        if (factory?.startsWith('create')) {
+          builtins.push(factory.slice('create'.length).toLowerCase());
+          if (ts.isCallExpression(argument) && ['createExec', 'createBf', 'createSudo'].includes(factory)) {
+            ownerArguments.set(factory, argument.arguments.map(value => value.getText(source)));
+          }
+        }
       }
       node.forEachChild(visitLoads);
     };
     visitLoads(source);
     assert.deepEqual(builtins.sort(), ['agent', 'alias', 'autofix', 'bf', 'env', 'exec', 'help', 'loglevel',
       'memory', 'ping', 'prefix', 'privacy', 'restart', 'status', 'sudo', 'sysinfo', 'tpm', 'update', 'version'].sort());
+    assert.deepEqual(Object.fromEntries(ownerArguments), {
+      createExec: ['selfId'], createBf: ['root', 'selfId'], createSudo: ['selfId'],
+    });
   } finally {
     api.close();
   }

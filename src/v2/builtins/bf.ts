@@ -6,7 +6,7 @@ import {isOwnerOrGroupSendAs} from "../permissions";
 import {existsSync} from "node:fs";
 import {renderCommandHelp} from "../commands";
 
-export default function createBf(root = process.cwd()) {
+export default function createBf(root = process.cwd(), ownerId = process.env.TB_OWNER_ID) {
   const bfCommand: CommandDefinition = {
     description: "打包并发送 Mi Box 备份",
     helpArgs: ["help", "h"],
@@ -36,7 +36,7 @@ export default function createBf(root = process.cwd()) {
       },
     ],
     async handle(invocation, ctx) {
-      if (!isOwnerOrGroupSendAs(invocation.message, process.env.TB_OWNER_ID)) {
+      if (!isOwnerOrGroupSendAs(invocation.message, ownerId)) {
         await ctx.telegram.edit(invocation.message, "没有创建备份的权限");
         return;
       }

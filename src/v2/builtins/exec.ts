@@ -9,7 +9,8 @@ function escape(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-const execCommand: CommandDefinition = {
+function command(ownerId?: string): CommandDefinition {
+  return {
   description: "执行一个非 shell 系统命令",
   helpArgs: ["help", "h"],
   helpOnEmpty: true,
@@ -40,7 +41,7 @@ const execCommand: CommandDefinition = {
   ],
   async handle(invocation, ctx) {
     const [file, ...args] = invocation.args;
-    if (!isOwnerOrGroupSendAs(invocation.message, process.env.TB_OWNER_ID)) {
+    if (!isOwnerOrGroupSendAs(invocation.message, ownerId)) {
       await ctx.telegram.edit(invocation.message, "没有执行系统命令的权限");
       return;
     }
@@ -66,9 +67,11 @@ const execCommand: CommandDefinition = {
       if (!ctx.signal.aborted) await ctx.telegram.edit(invocation.message, "命令执行失败、超时或输出过大");
     }
   },
-};
+  };
+}
 
-export default function createExec() {
+export default function createExec(ownerId = process.env.TB_OWNER_ID) {
+  const execCommand = command(ownerId);
   return definePlugin({
     apiVersion: STRUCTURED_PLUGIN_API_VERSION,
     id: "exec",

@@ -6,7 +6,8 @@ import { ScopedHttp, type ScopedHttpOptions } from "./http";
 import type { TelegramClient } from "teleproto";
 import path from "node:path";
 import {SqliteStore, type SqliteConnection, type SqliteOptions} from "./sqlite";
-import {DEFAULT_PROCESS_LIMITS, resolveProcessLimits, ScopedProcesses, type ProcessLimits, type ProcessRunOptions} from "./processes";
+import {DEFAULT_PROCESS_LIMITS, ProcessAbortedError, ProcessClosedError, resolveProcessLimits, ScopedProcesses,
+  type ProcessLimits, type ProcessRunOptions} from "./processes";
 import {SettingsRegistry} from "./settings";
 import {ScopedFiles} from "./files";
 import { definePlugin, type CommandDefinition, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type MessageFilter, type TelegramPort } from "./sdk";
@@ -225,6 +226,7 @@ export class PluginHost {
     const processQueue = pluginProcessLimits && new KeyedExecutor(
       pluginProcessLimits.concurrency, pluginProcessLimits.queueCapacity, scope.signal,
     );
+    let processSequence = 0;
     if (processQueue) scope.add("plugin-process-queue", () => processQueue.close());
     const runProcess = (command: string, args: readonly string[] = [], options: ProcessRunOptions = {}) => {
       if (pluginProcessLimits) {
@@ -242,8 +244,16 @@ export class PluginHost {
       };
       return scope.run("process:run", signal => {
         this.processes ??= new ScopedProcesses(this.root, this.processCaps);
-        const execute = () => this.processes!.run(command, args, {...invocation, signal: combined(signal, options.signal)});
-        return processQueue ? processQueue.submit("process", execute, signal) : execute();
+        const callerSignal = combined(signal, options.signal);
+        const execute = () => this.processes!.run(command, args, {...invocation, signal: callerSignal});
+        if (!processQueue) return execute();
+        return processQueue.submit(String(++processSequence), execute, callerSignal).catch(error => {
+          if (callerSignal.aborted && error === callerSignal.reason) {
+            throw scope.signal.aborted ? new ProcessClosedError() : new ProcessAbortedError();
+          }
+          if (error instanceof ExecutorClosedError) throw new ProcessClosedError();
+          throw error;
+        });
       });
     };
     return Object.freeze({
@@ -377,7 +387,9 @@ export class PluginHost {
   }
 
   private parse(text: string): {prefix: string; command: string; args: string[]; text: string} | undefined {
-    const prefix = this.prefixes.find(candidate => text.startsWith(candidate));
+    const prefix = this.prefixes.reduce<string | undefined>((matched, candidate) =>
+      text.startsWith(candidate) && (matched === undefined || candidate.length > matched.length) ? candidate : matched,
+    undefined);
     if (prefix === undefined) return;
     const parts = text.slice(prefix.length).trim().split(/\s+/).filter(Boolean);
     if (!parts.length) return;

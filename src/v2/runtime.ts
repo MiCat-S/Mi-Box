@@ -144,11 +144,11 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     await host.load(createSysinfo());
     await host.load(createVersion(root));
     await host.load(createAgent());
-    await host.load(createExec());
+    await host.load(createExec(selfId));
     const restart = createRestart(selfId, rootScope.signal);
     await host.load(restart);
-    await host.load(createBf(root));
-    await host.load(createSudo());
+    await host.load(createBf(root, selfId));
+    await host.load(createSudo(selfId));
     const selection = releaseStorage.json<ReleaseState>("tpm", "releases.json", {schemaVersion: 1, plugins: {}});
     releases = new PluginReleases(host, {artifactRoot: path.join(root, "dist/v2-plugins"), store: selection});
     await host.load(createTpm(host, releases, root, selfId));

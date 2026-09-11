@@ -1,6 +1,6 @@
 import test, {type TestContext} from "node:test";
 import assert from "node:assert/strict";
-import {mkdtemp, realpath, rm} from "node:fs/promises";
+import {mkdtemp, realpath, rm, stat} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import path from "node:path";
 import {PluginHost, type HostOptions} from "./host";
@@ -8,6 +8,7 @@ import {definePlugin, type PluginDefinition, type MessageEnvelope, type CommandI
 import {SelfDrainError} from "./lifecycle";
 import {createHelp} from "./builtins/help";
 import {HTMLParser} from "teleproto/extensions/html.js";
+import {ProcessAbortedError} from "./processes";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -100,6 +101,16 @@ test("host parses longest aliases without changing the original message", async 
   assert.equal(received!.message.topicId, 42);
   assert.equal(message.text, "!go now extra");
   assert.equal(await host.dispatchPrimary({...envelope, text: ".toString"}), false);
+});
+
+test("overlapping command prefixes dispatch using the longest match", async t => {
+  const {host} = await fixture(t, {prefixes: [".", ".."]});
+  const prefixes: string[] = [];
+  await host.load(plugin(({prefix}) => { prefixes.push(prefix); }));
+  assert.equal(await host.dispatchPrimary({...envelope, text: ".ping"}), true);
+  assert.equal(await host.dispatchPrimary({...envelope, id: 2, text: "..ping"}), true);
+  assert.deepEqual(prefixes, [".", ".."]);
+  assert.deepEqual(host.configuration().prefixes, [".", ".."]);
 });
 
 test("plugin contexts expose current command routing without mutation access", async t => {
@@ -532,6 +543,58 @@ test("plugin helper declarations are bounded by host limits and enforce local qu
   assert.throws(() => context.processes.run(process.execPath, ["-e", ""], {timeoutMs: 151}), /declared limit/);
   assert.throws(() => context.processes.run(process.execPath, ["-e", ""], {maxOutputBytes: 1025}), /declared limit/);
   await Promise.all([one, two]);
+});
+
+test("plugin helper declarations run independent processes up to their declared concurrency", async t => {
+  const {host, root} = await fixture(t, {processes: {
+    concurrency: 2, queueCapacity: 4, timeoutMs: 2000, maxOutputBytes: 2048,
+  }});
+  let context!: PluginContext;
+  await host.load(plugin(() => {}, {
+    resources: {processes: {concurrency: 2, queueCapacity: 2, timeoutMs: 1000, maxOutputBytes: 1024}},
+    setup(value) { context = value; },
+  }));
+  const script = "const fs=require('node:fs');const [root,id,other]=process.argv.slice(1);" +
+    "fs.writeFileSync(root+'/'+id,'ready');let n=0;const timer=setInterval(()=>{" +
+    "if(fs.existsSync(root+'/'+other)){clearInterval(timer);process.exit(0)}" +
+    "if(++n===50){clearInterval(timer);process.exit(42)}},10)";
+  const [one, two] = await Promise.all([
+    context.processes.run(process.execPath, ["-e", script, root, "one", "two"]),
+    context.processes.run(process.execPath, ["-e", script, root, "two", "one"]),
+  ]);
+  assert.deepEqual([one.exitCode, two.exitCode], [0, 0]);
+});
+
+test("plugin process queues cancel callers promptly and unload waits for active process reclamation", async t => {
+  const {host, root} = await fixture(t, {processes: {
+    concurrency: 1, queueCapacity: 3, timeoutMs: 3000, maxOutputBytes: 2048, killGraceMs: 100,
+  }});
+  let context!: PluginContext;
+  await host.load(plugin(() => {}, {
+    resources: {processes: {concurrency: 1, queueCapacity: 2, timeoutMs: 2000, maxOutputBytes: 1024}},
+    setup(value) { context = value; },
+  }));
+  const ready = path.join(root, "active-ready");
+  const active = context.processes.run(process.execPath, ["-e",
+    "const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync(process.argv[1],'ready');setTimeout(()=>{},2000)", ready]);
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    if (await stat(ready).then(() => true, () => false)) break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(await stat(ready).then(() => true, () => false), true);
+  const caller = new AbortController();
+  const queued = context.processes.run(process.execPath, ["-e", "process.exit(99)"], {signal: caller.signal});
+  const rejected = assert.rejects(queued, error => error instanceof ProcessAbortedError);
+  caller.abort(new Error("private cancellation reason"));
+  assert.equal(await Promise.race([rejected.then(() => "cancelled"),
+    new Promise(resolve => setTimeout(() => resolve("waiting"), 50))]), "cancelled");
+
+  const activeRejected = assert.rejects(active, /cancel|closed/i);
+  const first = await host.unload("ping", 5);
+  assert.equal(first?.completed, false);
+  assert.ok((first?.pendingTasks ?? 0) > 0 || (first?.pendingResources ?? 0) > 0);
+  await activeRejected;
+  assert.equal((await host.unload("ping", 1000))?.completed, true);
 });
 
 test("plugin helper declarations exceeding host limits fail before setup", async t => {

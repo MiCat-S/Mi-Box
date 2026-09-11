@@ -6,9 +6,9 @@ import {renderCommandHelp} from "../commands";
 interface SudoConfig extends Record<string, unknown> {users: string[];}
 const defaults: SudoConfig = {users: []};
 
-export default function createSudo() {
+export default function createSudo(ownerId = process.env.TB_OWNER_ID) {
   const authorize = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
-    if (isOwnerOrGroupSendAs(invocation.message, process.env.TB_OWNER_ID)) return true;
+    if (isOwnerOrGroupSendAs(invocation.message, ownerId)) return true;
     await ctx.telegram.edit(invocation.message, "只有 owner 可以管理 sudo 白名单");
     return false;
   };

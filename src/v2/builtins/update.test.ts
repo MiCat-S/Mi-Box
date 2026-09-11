@@ -21,6 +21,8 @@ function fixture(outputs: RunResult[] = [], options: {sender?: string} = {}) {
   const calls: string[][] = [];
   const edits: string[] = [];
   let step = 0;
+  let updateState: {pending: null | {ownerId: string; chatId: string; messageId: number; requestedAt: number;
+    bootId: string; requestId?: string}} = {pending: null};
   const originalGetuid = process.getuid;
   const originalDescriptor = Object.getOwnPropertyDescriptor(process, "getuid");
 
@@ -30,10 +32,10 @@ function fixture(outputs: RunResult[] = [], options: {sender?: string} = {}) {
       run: async () => Promise.resolve(),
     } as unknown as PluginContext["tasks"],
     storage: {json: () => ({
-      read: async () => ({pending: null}),
-      update: async (fn: (value: {pending: null}) => {pending: null | {ownerId: string; chatId: string; messageId: number; requestedAt: number; bootId: string}}) => {
-        const current = {pending: null};
-        return fn(current);
+      read: async () => updateState,
+      update: async (fn: (value: typeof updateState) => typeof updateState | Promise<typeof updateState>) => {
+        updateState = await fn(updateState);
+        return updateState;
       },
     })},
     log: {error: () => {}, info: () => {}},

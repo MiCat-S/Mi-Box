@@ -103,7 +103,7 @@ test('service generation preserves literal percent, dollar, quotes and spaces in
   assert.throws(() => renderUnits({root: '/srv/bot\nExecStart=/bin/false', node: '/bin/node'}), /control characters/);
 });
 
-function updateFixture(t, failure = '', rootOption = '') {
+function updateFixture(t, failure = '', rootOption = '', requestId = '') {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-update-')));
   const root = path.join(base, 'nested bot');
   fs.mkdirSync(path.join(root, 'scripts'), {recursive: true});
@@ -122,6 +122,7 @@ git() {
 npm() {
   printf 'npm %s\\n' "$*" >> "$commands"
   if [[ "$*" == "$FAIL_STEP" ]]; then printf '%s\\n' build-failed >&2; return 7; fi
+  if [[ "$1" == ci ]]; then mkdir -p node_modules; fi
 }
 systemctl() { printf 'systemctl %s\\n' "$*" >> "$commands"; }
 acquire_update_lock() { return 0; }
@@ -131,10 +132,15 @@ main "$@"
   const commands = path.join(base, 'commands');
   const selected = path.join(base, 'selected bot');
   if (rootOption) fs.mkdirSync(selected);
+  const actualRoot = rootOption ? selected : root;
+  fs.writeFileSync(path.join(actualRoot, 'package-lock.json'), '{"lockfileVersion":3}\n');
+  if (requestId) {
+    fs.mkdirSync(path.join(actualRoot, 'temp'), {recursive: true});
+    fs.writeFileSync(path.join(actualRoot, 'temp/update-request.json'), JSON.stringify({requestId}));
+  }
   const args = rootOption === '--root' ? ['--root', './selected bot'] : rootOption ? ['./selected bot'] : [];
   const result = spawnSync('bash', ['-c', harness, 'update-test', updater, process.execPath, commands, ...args],
     {cwd: base, encoding: 'utf8', env: {...process.env, FAIL_STEP: failure}});
-  const actualRoot = rootOption ? selected : root;
   return {root: actualRoot, result, calls: fs.readFileSync(commands, 'utf8'),
     receipt: JSON.parse(fs.readFileSync(path.join(actualRoot, 'temp/update-result.json'), 'utf8'))};
 }
@@ -172,6 +178,69 @@ test('updater preserves a failed step exit code and does not restart after faile
   assert.doesNotMatch(calls, /systemctl|run check:v2/);
   assert.equal(receipt.status, 'failed');
   assert.match(receipt.reason, /构建主程序失败（退出码 7）：build-failed/);
+});
+
+test('updater carries the accepted request id into its atomic result', t => {
+  const requestId = '12345678-1234-4234-8234-123456789abc';
+  const {root, result, receipt} = updateFixture(t, '', '--root', requestId);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(receipt, {status: 'success', reason: '', requestId});
+  assert.equal(fs.existsSync(path.join(root, 'temp/update-request.json')), false);
+  assert.equal(fs.readdirSync(path.join(root, 'temp')).some(name => name.startsWith('update-request.claim.')), false);
+});
+
+test('a rejected updater lock does not consume or overwrite another request', t => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-update-lock-')));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  const root = path.join(base, 'deployment');
+  fs.mkdirSync(path.join(root, 'temp'), {recursive: true});
+  fs.writeFileSync(path.join(root, 'package-lock.json'), '{"lockfileVersion":3}\n');
+  const request = {requestId: '12345678-1234-4234-8234-123456789abc'};
+  const previous = {status: 'success', reason: 'previous', requestId: '87654321-4321-4321-8321-cba987654321'};
+  fs.writeFileSync(path.join(root, 'temp/update-request.json'), JSON.stringify(request));
+  fs.writeFileSync(path.join(root, 'temp/update-result.json'), JSON.stringify(previous));
+  const updater = path.join(__dirname, 'update-service.sh');
+  const harness = 'source "$1"; git() { :; }; acquire_update_lock() { return 3; }; main "$2"';
+  const result = spawnSync('bash', ['-c', harness, 'lock-test', updater, root], {encoding: 'utf8'});
+  assert.equal(result.status, 3);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'temp/update-request.json'), 'utf8')), request);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'temp/update-result.json'), 'utf8')), previous);
+});
+
+test('updater retries dependency installation after an interrupted npm ci', t => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'service-update-retry-')));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  const root = path.join(base, 'deployment');
+  const bin = path.join(base, 'bin');
+  fs.mkdirSync(path.join(root, 'node_modules'), {recursive: true});
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(root, 'package-lock.json'), '{"lockfileVersion":3,"packages":{"dep":{"version":"1"}}}\n');
+  const executable = (name, body) => {
+    const file = path.join(bin, name);
+    fs.writeFileSync(file, body, {mode: 0o755});
+  };
+  executable('git', '#!/bin/bash\nif [[ "$1" == -C ]]; then shift 2; fi\nif [[ "$1" == rev-parse ]]; then echo true; fi\n');
+  executable('npm', `#!/bin/bash
+printf '%s\\n' "$*" >> calls
+if [[ "$1" == ci ]]; then
+  mkdir -p node_modules
+  if [[ ! -f attempted ]]; then touch attempted node_modules/incomplete; exit 27; fi
+  rm -f node_modules/incomplete
+elif [[ "$1 $2" == 'run package:v2' && -f node_modules/incomplete ]]; then
+  exit 34
+fi
+`);
+  executable('systemctl', '#!/bin/bash\nprintf "%s\\n" "systemctl $*" >> calls\n');
+  const updater = path.join(__dirname, 'update-service.sh');
+  const harness = 'source "$1"; acquire_update_lock() { :; }; main "$2"';
+  const run = () => spawnSync('bash', ['-c', harness, 'retry-test', updater, root], {cwd: root, encoding: 'utf8',
+    env: {...process.env, PATH: bin + path.delimiter + path.dirname(process.execPath) + path.delimiter + process.env.PATH}});
+  assert.equal(run().status, 27);
+  assert.equal(run().status, 0);
+  const calls = fs.readFileSync(path.join(root, 'calls'), 'utf8').trim().split('\n');
+  assert.equal(calls.filter(call => call === 'ci').length, 2);
+  assert.equal(fs.existsSync(path.join(root, 'node_modules/incomplete')), false);
+  assert.match(fs.readFileSync(path.join(root, 'node_modules/.mibot-package-lock.sha256'), 'utf8'), /^[0-9a-f]{64}\n$/);
 });
 
 test('installer rollback restores both service units and preserves account data', t => {

@@ -5,10 +5,13 @@ umask 077
 write_result() {
   node -e '
 const fs = require("fs");
-const [status, reason, target] = process.argv.slice(1);
-fs.writeFileSync(target, JSON.stringify({status, reason}), {encoding: "utf8", mode: 0o600});
-fs.chmodSync(target, 0o600);
-' "$1" "$2" "$result_file"
+const [status, reason, target, requestId] = process.argv.slice(1);
+const result = {status, reason};
+if (requestId) result.requestId = requestId;
+const temporary = `${target}.tmp.${process.pid}`;
+fs.writeFileSync(temporary, JSON.stringify(result), {encoding: "utf8", mode: 0o600});
+fs.renameSync(temporary, target);
+' "$1" "$2" "$result_file" "$request_id"
 }
 
 run_step() {
@@ -51,19 +54,45 @@ main() {
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null
   cd "$root"
   result_file="$root/temp/update-result.json"
+  request_file="$root/temp/update-request.json"
+  request_claim="$root/temp/update-request.claim.$$"
+  request_id=""
   status="failed"
   reason="更新服务异常退出"
   mkdir -p "$root/temp"
-  trap 'if [[ "$status" != "success" ]]; then write_result "$status" "$reason"; fi' EXIT
 
   acquire_update_lock
 
-  before=$(git rev-parse HEAD)
-  run_step "拉取代码" git pull --ff-only origin main
-  after=$(git rev-parse HEAD)
+  if mv "$request_file" "$request_claim" 2>/dev/null; then
+    request_id=$(node -e '
+const fs = require("fs");
+try {
+  const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (typeof value.requestId === "string" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value.requestId)) process.stdout.write(value.requestId);
+} catch {}
+' "$request_claim")
+    rm -f "$request_claim"
+  fi
+  trap 'if [[ "$status" != "success" ]]; then write_result "$status" "$reason"; fi' EXIT
 
-  if [[ "$before" != "$after" || ! -d node_modules ]]; then
+  run_step "拉取代码" git pull --ff-only origin main
+  dependency_fingerprint=$(node -e '
+const fs = require("fs");
+const crypto = require("crypto");
+process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));
+' "$root/package-lock.json")
+  dependency_marker="$root/node_modules/.mibot-package-lock.sha256"
+  installed_fingerprint=""
+  if [[ -f "$dependency_marker" ]]; then installed_fingerprint=$(<"$dependency_marker"); fi
+  if [[ ! -d node_modules || "$installed_fingerprint" != "$dependency_fingerprint" ]]; then
     run_step "安装依赖" npm ci
+    run_step "记录依赖状态" node -e '
+const fs = require("fs");
+const [target, fingerprint] = process.argv.slice(1);
+const temporary = `${target}.tmp.${process.pid}`;
+fs.writeFileSync(temporary, fingerprint + "\n", {encoding: "utf8", mode: 0o600});
+fs.renameSync(temporary, target);
+' "$dependency_marker" "$dependency_fingerprint"
   fi
   run_step "构建主程序" npm run package:v2
   run_step "运行运行时自检" npm run check:v2
