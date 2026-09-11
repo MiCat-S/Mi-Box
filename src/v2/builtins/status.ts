@@ -5,7 +5,9 @@ import {readFile, statfs} from "node:fs/promises";
 import {setTimeout as delay} from "node:timers/promises";
 import {getBotName} from "../branding";
 import {STRUCTURED_PLUGIN_API_VERSION, definePlugin, type CommandDefinition, type PluginContext} from "../sdk";
+import {CustomFile} from "teleproto/client/uploads.js";
 import {bold, code, concat, text, type Html} from "../ui/text";
+import {renderStatusCard} from "./status-card";
 
 export interface ProcessMemorySnapshot {
   readonly rss: number;
@@ -262,21 +264,8 @@ export function formatPercent(value: number | undefined): string {
   return value === undefined || !Number.isFinite(value) ? "不可用" : `${value.toFixed(1)}%`;
 }
 
-export function waterline(used: number, total: number): string {
-  if (!Number.isFinite(used) || !Number.isFinite(total) || used < 0 || total <= 0) return "────────";
-  const percent = Math.max(0, Math.min(100, used / total * 100));
-  const filled = Math.round(percent / 100 * 8);
-  return `${"▰".repeat(filled)}${"▱".repeat(8 - filled)}`;
-}
-
 function row(label: string, value: string): Html {
   return concat(text("• "), text(label), text(": "), code(value));
-}
-
-function capacityRow(label: string, snapshot: CapacitySnapshot | undefined, empty = "不可用"): Html {
-  if (!snapshot) return row(label, empty);
-  if (snapshot.total === 0) return row(label, "未启用");
-  return row(label, `${waterline(snapshot.used, snapshot.total)} ${formatPercent(snapshot.used / snapshot.total * 100)} · ${formatBytes(snapshot.used)} / ${formatBytes(snapshot.total)}`);
 }
 
 function section(title: string, rows: readonly Html[]): Html {
@@ -291,21 +280,11 @@ function formatNetworkInterfaces(names: readonly string[]): string {
 
 export function renderStatus(snapshot: StatusSnapshot): Html {
   const name = getBotName();
-  const version = snapshot.revision ? `${snapshot.applicationVersion} (${snapshot.revision})` : snapshot.applicationVersion;
   const load = snapshot.loadAverage.slice(0, 3).map(value =>
     Number.isFinite(value) ? value.toFixed(2) : "不可用").join(" / ");
   const processShare = snapshot.systemMemory.total > 0
     ? snapshot.processMemory.rss / snapshot.systemMemory.total * 100 : undefined;
   return concat(
-    bold(`📡 ${name} 运行面板`), text("\n"),
-    concat(text("🟢 在线 · 本次采样 "), code(`${snapshot.scanDurationMs}ms`)),
-    text("\n\n"),
-    section("🧩 核心", [
-      row(name, version),
-      row("运行时", `Node.js ${snapshot.nodeVersion} · Teleproto ${snapshot.teleprotoVersion}`),
-      row("进程", `PID ${snapshot.pid} · 在线 ${formatDuration(snapshot.processUptime)}`),
-    ]),
-    text("\n\n"),
     section("🖥 主机", [
       row("节点", `${snapshot.hostname} · ${snapshot.platform}/${snapshot.arch}`),
       row("系统", snapshot.operatingSystem),
@@ -314,18 +293,17 @@ export function renderStatus(snapshot: StatusSnapshot): Html {
       row("网络", formatNetworkInterfaces(snapshot.networkInterfaces)),
     ]),
     text("\n\n"),
-    section("💓 资源水位", [
-      row("CPU", `系统 ${formatPercent(snapshot.cpu.systemPercent)} · ${name} ${formatPercent(snapshot.cpu.processPercent)} · ${snapshot.cpu.logicalCores} 线程`),
-      capacityRow("内存", snapshot.systemMemory),
+    section("🧠 进程", [
+      row("进程", `PID ${snapshot.pid} · ${snapshot.cpu.logicalCores} 线程`),
+      row(`${name} CPU`, formatPercent(snapshot.cpu.processPercent)),
       row(`${name} RSS`, `${formatBytes(snapshot.processMemory.rss)} · ${formatPercent(processShare)}`),
       row("JS Heap", `${formatBytes(snapshot.processMemory.heapUsed)} / ${formatBytes(snapshot.processMemory.heapTotal)}`),
-      capacityRow("Swap", snapshot.swap, "当前平台不可用"),
-      capacityRow("磁盘", snapshot.disk),
     ]),
     text("\n\n"),
-    section("⏱ 时间", [
+    section("⏱ 运行详情", [
       row("主机在线", formatDuration(snapshot.hostUptime)),
       row("负载 1 / 5 / 15 分钟", load),
+      row("状态采样", `${snapshot.scanDurationMs}ms`),
     ]),
   );
 }
@@ -339,9 +317,8 @@ export default function createStatus(root = process.cwd(), collector: StatusColl
     help: [
       {
         heading: "输出内容",
-        body: "• 核心：MiBot、Node.js、Teleproto、提交版本与进程在线时间。\n" +
-          "• 主机：系统、内核、语言环境和活动网络接口。\n" +
-          "• 资源：CPU 短时采样，以及内存、Swap、磁盘与系统负载快照。",
+        body: "• 图片：运行状态、进程在线时间、核心版本，以及 CPU、内存、Swap、磁盘水位。\n" +
+          "• 图片说明：主机、系统、内核、网络、进程内存、负载与采样耗时。",
       },
       {
         heading: "说明",
@@ -359,8 +336,23 @@ export default function createStatus(root = process.cwd(), collector: StatusColl
           return;
         }
       };
-      await ctx.telegram.edit(invocation.message, renderStatus(await collector(root, ctx.signal, revision)),
-        {parseMode: "html", linkPreview: false});
+      try {
+        const snapshot = await collector(root, ctx.signal, revision);
+        const card = renderStatusCard(snapshot, getBotName());
+        const raw = invocation.message.raw as {peerId?: unknown; inputChat?: unknown; delete?: (options?: {revoke?: boolean}) => Promise<unknown>} | undefined;
+        if (!raw?.peerId) throw new Error("Status message context unavailable");
+        await ctx.telegram.withClient(async (client, signal) => {
+          signal.throwIfAborted();
+          const file = new CustomFile("mibot-status.png", card.length, "", card);
+          await client.sendFile((raw.inputChat ?? raw.peerId) as never, {file, caption: renderStatus(snapshot), parseMode: "html",
+            forceDocument: false, ...(invocation.message.topicId ? {topMsgId: invocation.message.topicId} : {})});
+          try { await raw.delete?.({revoke: true}); }
+          catch { ctx.log.error("status_command_delete_failed"); }
+        });
+      } catch {
+        ctx.log.error("status_card_failed");
+        if (!ctx.signal.aborted) await ctx.telegram.edit(invocation.message, "状态面板生成或发送失败，请稍后重试");
+      }
     },
   };
 

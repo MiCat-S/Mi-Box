@@ -1,6 +1,6 @@
 {
   "name": "telebox",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "",
   "scripts": {
     "start": "node dist/v2/index.js --serve",
