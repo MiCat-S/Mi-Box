@@ -48,9 +48,13 @@
 | Telegram 文本/原生调用 | `ctx.telegram.*`、`withClient` | 账号连接归 runtime；默认文本为字面文本 |
 | JSON / SQLite | `ctx.storage.json` / `sqlite` | 插件命名空间、串行更新；不自建常驻数据库单例 |
 | HTTP / 流 | `ctx.http.json` / `text` / `withResponse` | 响应体消费和取消清理都计入生命周期 |
+| 不可信正则 | `ctx.regexp.test`、`SAFE_REGEXP_LIMITS` | Worker 隔离、固定输入上限、4 路并发/64 队列与硬超时；超时按不匹配处理 |
 | 临时媒体 / 原生程序 | `ctx.files.withTemp`、`ctx.processes.run` | 等上传/转码实际结束再清临时文件；遵守进程并发、队列和输出上限 |
 | 持久文件 | `ctx.files.dataDirectory` / `dataFile` / `dataPath` | `dataPath` 只解析路径，后续 I/O 仍需受管 |
+| Legacy SQLite | 声明 `legacyStorage.sqlite` 后使用 `ctx.storage.legacySqlite` | 只访问账号 assets 根目录中声明过的精确文件名；迁移成功后擦除旧秘密 |
 | Cron / 动态任务 | 声明 `jobs` 或 `ctx.jobs.register` | 重载恢复一次；动态删除使用返回的 disposer |
 | 跨插件服务 | `ctx.services.available` / `call` | 提供方通过 `services` 声明；处理服务调用的取消信号 |
 
 这些接口管理资源所有权，不是运行不可信代码的隔离沙箱。构件哈希用于完整性检查，不能证明来源可信；插件代码具有运行账号权限。
+
+第三方响应返回后续下载 URL 时，使用 `denyPrivateAddresses: true`，并继续配置逐跳 hostname allowlist。该策略在真实 DNS 连接点过滤地址，也检查 IPv4-mapped IPv6 与标准 NAT64 映射；只检查 URL 字面 hostname 不能防止解析到私网或 DNS rebinding。

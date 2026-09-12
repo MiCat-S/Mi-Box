@@ -27,7 +27,14 @@ export const STRUCTURED_PLUGIN_API_VERSION = 2 as const;
 export type PluginApiVersion = typeof PLUGIN_API_VERSION | typeof STRUCTURED_PLUGIN_API_VERSION;
 
 /** Named SDK capabilities that plugins can assert before relying on a helper. */
-export const SDK_FEATURES = Object.freeze({commandMetadata: 1, messageFilter: 1, commandHelp: 1} as const);
+export const SDK_FEATURES = Object.freeze({
+  commandMetadata: 1,
+  messageFilter: 1,
+  commandHelp: 1,
+  httpAddressPolicy: 1,
+  safeRegexp: 1,
+  legacySqlite: 1,
+} as const);
 export type SdkFeature = keyof typeof SDK_FEATURES;
 
 /**
@@ -61,6 +68,27 @@ export interface MessageEnvelope {
 /** Omitted parseMode means literal text, independent of the client's global default. */
 export interface MessageOptions { parseMode?: "html" | "markdown"; linkPreview?: boolean; }
 
+export interface SafeRegExpOptions {
+  /** Supported flags are i, m, s and u, without duplicates. */
+  readonly flags?: string;
+}
+
+export const SAFE_REGEXP_LIMITS = Object.freeze({
+  maxPatternLength: 512,
+  maxInputLength: 4096,
+  startupTimeoutMs: 1000,
+  executionTimeoutMs: 50,
+  concurrency: 4,
+  queueCapacity: 64,
+} as const);
+
+export type SafeRegExpErrorCode = "INVALID_PATTERN" | "INPUT_TOO_LARGE" | "QUEUE_FULL" | "WORKER_FAILED";
+
+export interface SafeRegExpResult {
+  readonly matched: boolean;
+  readonly timedOut: boolean;
+}
+
 // The transport is supplied by the authenticated account runtime. The SDK
 // never creates another client or imports the protocol library at module load.
 export interface TelegramPort {
@@ -89,6 +117,8 @@ export interface PluginContext {
   readonly storage: {
     json<T extends Record<string, unknown>>(fileName: string, defaults: T): Pick<JsonStore<T>, "read" | "update">;
     sqlite(fileName: string, options?: SqliteOptions): Pick<SqliteStore, "read" | "transaction" | "preflight">;
+    /** Accesses only account-level legacy SQLite files declared by this plugin. */
+    legacySqlite(fileName: string, options?: SqliteOptions): Pick<SqliteStore, "read" | "transaction" | "preflight">;
   };
   readonly jobs: {
     register(id: string, spec: ScheduledJob, handler: (signal: AbortSignal) => void | Promise<void>): Promise<() => Promise<void>>;
@@ -96,6 +126,10 @@ export interface PluginContext {
   readonly services: {
     available(pluginId: string, service: string): boolean;
     call<T = unknown>(pluginId: string, service: string, input: unknown, signal?: AbortSignal): Promise<T>;
+  };
+  readonly regexp: {
+    /** Executes untrusted patterns outside the event loop with fixed input and time budgets. */
+    test(pattern: string, input: string, options?: SafeRegExpOptions, signal?: AbortSignal): Promise<SafeRegExpResult>;
   };
   readonly plugins: {
     list(): readonly Readonly<{id: string; description: string}>[];
@@ -188,6 +222,10 @@ export interface PluginDefinition {
   readonly listeners?: readonly MessageListener[];
   readonly jobs?: Readonly<Record<string, JobDefinition>>;
   readonly services?: Readonly<Record<string, ServiceDefinition>>;
+  /** Exact account-level legacy files that setup may consume during migration. */
+  readonly legacyStorage?: {
+    readonly sqlite?: readonly string[];
+  };
   readonly settings?: (context: PluginContext) => SettingsAdapter;
   /** Optional per-plugin helper-process defaults, bounded by the host's hard limits. */
   readonly resources?: {
@@ -426,6 +464,11 @@ export function definePlugin(definition: PluginDefinition): PluginDefinition {
   });
   if (definition.renderHelp !== undefined && typeof definition.renderHelp !== "function") throw new Error("Invalid help renderer");
   if (definition.settings !== undefined && typeof definition.settings !== "function") throw new Error("Invalid settings factory");
+  const legacySqlite = definition.legacyStorage?.sqlite;
+  if (legacySqlite !== undefined && (!Array.isArray(legacySqlite) || legacySqlite.some(file =>
+    typeof file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.(db|sqlite|sqlite3)$/.test(file)))) {
+    throw new Error("Invalid legacy SQLite declaration");
+  }
   for (const [name, service] of Object.entries(definition.services ?? {})) {
     if (!/^[a-z0-9_]+$/i.test(name) || !service || typeof service.description !== "string" || typeof service.handle !== "function") {
       throw new Error("Invalid service definition");
@@ -442,7 +485,10 @@ export function definePlugin(definition: PluginDefinition): PluginDefinition {
     ...definition.resources,
     processes: definition.resources.processes && Object.freeze({...definition.resources.processes}),
   });
-  return Object.freeze({...definition, resources, commands: Object.freeze(commands),
+  const legacyStorage = definition.legacyStorage && Object.freeze({
+    sqlite: legacySqlite && Object.freeze([...new Set(legacySqlite)]),
+  });
+  return Object.freeze({...definition, resources, legacyStorage, commands: Object.freeze(commands),
     listeners: listeners && Object.freeze(listeners),
     jobs: freezeEntries(definition.jobs), services: freezeEntries(definition.services),
   });

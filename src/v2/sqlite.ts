@@ -10,6 +10,8 @@ export type SqliteConnection = Pick<Database.Database,
 
 export interface SqliteOptions {
   readonly readonly?: boolean;
+  /** Open an existing database without creating a missing file. */
+  readonly mustExist?: boolean;
   /** SQLite's synchronous busy timeout; AbortSignal cannot interrupt a running native statement. */
   readonly timeoutMs?: number;
 }
@@ -135,6 +137,7 @@ function scopeConnection(db: Database.Database): () => void {
 export class SqliteStore {
   private readonly file: string;
   private readonly readonly: boolean;
+  private readonly mustExist: boolean;
   private readonly timeout: number;
   private tail: Promise<void> = Promise.resolve();
   private closed = false;
@@ -147,6 +150,7 @@ export class SqliteStore {
     }
     this.file = path.resolve(file);
     this.readonly = options.readonly ?? false;
+    this.mustExist = options.mustExist ?? false;
     this.timeout = options.timeoutMs ?? 5000;
     if (!Number.isInteger(this.timeout) || this.timeout < 0 || this.timeout > 2_147_483_647) {
       throw new RangeError("SQLite timeoutMs must be an integer between 0 and 2147483647");
@@ -224,8 +228,9 @@ export class SqliteStore {
     // depends on better-sqlite3's installed package location. CJS exports use .default.
     const { default: NativeDatabase } = await import("better-sqlite3");
     signal?.throwIfAborted();
-    await checkPath(this.file, !readonly, signal);
-    if (!readonly) {
+    const create = !readonly && !this.mustExist;
+    await checkPath(this.file, create, signal);
+    if (create) {
       signal?.throwIfAborted();
       try {
         const file = await fs.open(this.file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);

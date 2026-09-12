@@ -54,6 +54,7 @@ export default function createExample() {
 - 根入口写在 `commands`，标准子命令写在递归 `subcommands`，子命令别名写 `aliases`。每个节点保留 `handle` 处理未匹配输入；不要维护一套与声明不一致的 switch 分发。
 - `invocation.args` 已去掉匹配的子命令路径。全文、多行、JSON、正则等输入按业务需要读 `message.text`；实体偏移等协议信息查看 `message.raw`。别名路由可能重写业务命令文本，不能把拆分后重组的 args 当作原始消息。
 - 用 `args`、`arguments`、`alternates`、`examples`、`help` 描述用法；宿主和 `renderCommandHelp` 读取同一声明。帮助使用当前 prefix，动态 HTML 用 `ui.text` / `ui.code` 等转义。品牌名称读 `getBotName()`。
+- 依赖公网地址过滤、隔离正则或 Legacy SQLite 迁移时，分别声明 `requireSdkFeatures("httpAddressPolicy")`、`requireSdkFeatures("safeRegexp")`、`requireSdkFeatures("legacySqlite")`，让旧 Core 在加载时明确拒绝。
 - 帮助渲染不执行业务与授权处理器，因此只能包含适合公开展示的说明，不能夹带运行时私密状态。默认 `parseMode` 是字面文本；需要 HTML 时明确传 `{parseMode: "html"}`。长输出用 `ui` 分页并处理部分发送结果。
 - 聊天范围通过 `chats`、`direction`、`ignoreForwarded`、`includeSaved` 声明；命令编辑消息用 `ignoreEdited`，监听器用 `edited` / `ignoreCommands`。受限聊天列表不匹配 `unknown`，不要为了分类给每条消息添加 RPC。
 - 范围过滤不替代权限检查。管理操作复用当前权限辅助函数，并验证账号本人、委托和频道身份等相关入口。监听器的用户白名单、业务开关在范围过滤后执行。

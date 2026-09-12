@@ -1,4 +1,7 @@
 import { ResourceScope } from "./lifecycle";
+import {lookup as dnsLookup, type LookupAddress} from "node:dns";
+import {BlockList, isIP} from "node:net";
+import {Agent} from "undici";
 
 const messages = {
   ABORTED: "HTTP operation was cancelled",
@@ -11,6 +14,7 @@ const messages = {
   CLEANUP_FAILED: "HTTP response cleanup failed",
   REDIRECT_BLOCKED: "HTTP redirect target is not allowed",
   TOO_MANY_REDIRECTS: "HTTP response exceeded the redirect limit",
+  ADDRESS_BLOCKED: "HTTP target address is not allowed",
   CLOSED: "HTTP response lifetime ended",
 } as const;
 
@@ -42,6 +46,8 @@ export class HttpStatusError extends Error {
 
 export interface ScopedHttpOptions {
   fetch?: typeof fetch;
+  /** Test seam for the public-address dispatcher. */
+  lookup?: typeof dnsLookup;
   timeoutMs?: number;
   maxResponseBytes?: number;
 }
@@ -54,6 +60,91 @@ export interface HttpRequestOptions {
     allowedHosts: readonly string[];
     maxRedirects?: number;
   };
+  /** Resolve and connect only to public Internet addresses, including every redirect. */
+  denyPrivateAddresses?: boolean;
+}
+
+const blockedAddresses = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+  ["192.31.196.0", 24], ["192.52.193.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16],
+  ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24],
+  ["224.0.0.0", 4], ["240.0.0.0", 4],
+] as const) blockedAddresses.addSubnet(network, prefix, "ipv4");
+for (const [network, prefix] of [
+  ["::", 128], ["::1", 128], ["64:ff9b:1::", 48], ["100::", 64], ["2001::", 23], ["2001:db8::", 32],
+  ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
+] as const) blockedAddresses.addSubnet(network, prefix, "ipv6");
+
+function ipv6Words(address: string): number[] | undefined {
+  let source = address.toLowerCase().split("%", 1)[0]!;
+  const dotted = source.match(/(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1];
+  if (dotted) {
+    const octets = dotted.split(".").map(Number);
+    if (octets.length !== 4 || octets.some(value => !Number.isInteger(value) || value < 0 || value > 255)) return;
+    source = `${source.slice(0, -dotted.length)}${((octets[0]! << 8) | octets[1]!).toString(16)}:${((octets[2]! << 8) | octets[3]!).toString(16)}`;
+  }
+  const halves = source.split("::");
+  if (halves.length > 2) return;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return;
+  const words = [...left, ...Array(missing).fill("0"), ...right].map(value => /^[0-9a-f]{1,4}$/.test(value) ? Number.parseInt(value, 16) : -1);
+  return words.length === 8 && words.every(value => value >= 0 && value <= 0xffff) ? words : undefined;
+}
+
+function embeddedIpv4(address: string): string | undefined {
+  const words = ipv6Words(address);
+  if (!words) return;
+  const mapped = words.slice(0, 5).every(value => value === 0) && words[5] === 0xffff;
+  const wellKnownNat64 = words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every(value => value === 0);
+  if (!mapped && !wellKnownNat64) return;
+  return `${words[6]! >>> 8}.${words[6]! & 0xff}.${words[7]! >>> 8}.${words[7]! & 0xff}`;
+}
+
+function addressBlocked(address: string, family?: number): boolean {
+  const detected = family === 4 || family === 6 ? family : isIP(address);
+  if (!detected) return true;
+  const embedded = detected === 6 ? embeddedIpv4(address) : undefined;
+  return embedded ? blockedAddresses.check(embedded, "ipv4")
+    : blockedAddresses.check(address, detected === 4 ? "ipv4" : "ipv6");
+}
+
+function blockedAddressError(): Error & {code: string} {
+  return Object.assign(new Error("Blocked address"), {code: "TELEBOX_ADDRESS_BLOCKED"});
+}
+
+type LookupCallback = (error: NodeJS.ErrnoException | null, address?: string | LookupAddress[], family?: number) => void;
+
+function createPublicLookup(resolve: typeof dnsLookup) {
+  return (hostname: string, options: {family?: number; hints?: number; all?: boolean}, callback: LookupCallback): void => {
+  resolve(hostname, {...options, all: true}, (error, addresses) => {
+    if (error) { callback(error); return; }
+    if (!addresses.length || addresses.some(item => addressBlocked(item.address, item.family))) {
+      callback(blockedAddressError());
+      return;
+    }
+    const selected = options.family ? addresses.filter(item => item.family === options.family) : addresses;
+    if (!selected.length) { callback(blockedAddressError()); return; }
+    if (options.all) callback(null, selected);
+    else callback(null, selected[0]!.address, selected[0]!.family);
+  });
+  };
+}
+
+function publicTarget(input: string | URL): URL {
+  let url: URL;
+  try { url = new URL(input.toString()); }
+  catch { throw new HttpError("ADDRESS_BLOCKED"); }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new HttpError("ADDRESS_BLOCKED");
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const family = isIP(hostname);
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || family && addressBlocked(hostname, family)) {
+    throw new HttpError("ADDRESS_BLOCKED");
+  }
+  return url;
 }
 
 function validateTimeout(timeoutMs: number): void {
@@ -125,6 +216,7 @@ function nativeErrorCode(error: unknown): HttpErrorCode | undefined {
     case "ENOTFOUND":
     case "EAI_AGAIN": return "DNS_FAILED";
     case "ECONNREFUSED": return "CONNECTION_REFUSED";
+    case "TELEBOX_ADDRESS_BLOCKED": return "ADDRESS_BLOCKED";
     default: return undefined;
   }
 }
@@ -147,16 +239,30 @@ export class ScopedHttp {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
+  private readonly lookup: typeof dnsLookup;
+  private publicAgent?: Agent;
 
   constructor(scope: ResourceScope, options: ScopedHttpOptions = {}) {
     this.scope = scope;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.lookup = options.lookup ?? dnsLookup;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.maxResponseBytes = options.maxResponseBytes ?? 2 * 1024 * 1024;
     validateTimeout(this.timeoutMs);
     if (!Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes < 0) {
       throw new RangeError("maxResponseBytes must be a non-negative safe integer");
     }
+  }
+
+  private publicDispatcher(): Agent {
+    if (this.publicAgent) return this.publicAgent;
+    const agent = new Agent({connect: {lookup: createPublicLookup(this.lookup) as never}});
+    this.publicAgent = agent;
+    this.scope.add("http-public-dispatcher", async () => {
+      this.publicAgent = undefined;
+      await agent.close();
+    });
+    return agent;
   }
 
   /**
@@ -200,20 +306,25 @@ export class ScopedHttp {
         if (timeoutMs === 0) cancel("TIMEOUT");
         if (cancellation) throw cancellation;
         timer = setTimeout(() => cancel("TIMEOUT"), timeoutMs);
+        const withAddressPolicy = (request: RequestInit): RequestInit => options.denyPrivateAddresses
+          ? ({...request, dispatcher: this.publicDispatcher()} as RequestInit) : request;
         // Do not race cancellation against this promise: ignored signals must stay tracked.
         if (!redirects) {
-          response = await this.fetchImpl(url, { ...init, signal });
+          const target = options.denyPrivateAddresses ? publicTarget(url) : url;
+          response = await this.fetchImpl(target, withAddressPolicy({ ...init, signal }));
         } else {
           let current = allowedURL(url, undefined, redirects.allowed);
+          if (options.denyPrivateAddresses) publicTarget(current);
           let request: RequestInit = {...init, redirect: "manual"};
           let followed = 0;
           while (true) {
-            response = await this.fetchImpl(current, {...request, redirect: "manual", signal});
+            response = await this.fetchImpl(current, withAddressPolicy({...request, redirect: "manual", signal}));
             if (![301, 302, 303, 307, 308].includes(response.status)) break;
             const location = response.headers.get("location");
             if (location === null) break;
             if (followed >= redirects.maximum) throw new HttpError("TOO_MANY_REDIRECTS");
             const next = allowedURL(location, current, redirects.allowed);
+            if (options.denyPrivateAddresses) publicTarget(next);
             request = redirectedInit(current, next, response.status, request);
             if (response.body && !response.body.locked) await response.body.cancel();
             response = undefined;

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  definePlugin, requireSdkFeatures, SDK_FEATURES, STRUCTURED_PLUGIN_API_VERSION,
+  definePlugin, requireSdkFeatures, SAFE_REGEXP_LIMITS, SDK_FEATURES, STRUCTURED_PLUGIN_API_VERSION,
   type CommandInvocation, type MessageEnvelope, type PluginContext,
 } from "./sdk";
 import {renderCommandHelp, resolveHelpPath, hasStructuredHelp} from "./commands";
@@ -159,9 +159,13 @@ test("generated help derives usage, aliases, examples and long sections from one
 });
 
 test("SDK feature assertions expose a stable capability list", () => {
-  assert.deepEqual(Object.keys(SDK_FEATURES), ["commandMetadata", "messageFilter", "commandHelp"]);
-  assert.doesNotThrow(() => requireSdkFeatures("commandMetadata", "commandHelp"));
+  assert.deepEqual(Object.keys(SDK_FEATURES), [
+    "commandMetadata", "messageFilter", "commandHelp", "httpAddressPolicy", "safeRegexp", "legacySqlite",
+  ]);
+  assert.doesNotThrow(() => requireSdkFeatures("commandMetadata", "commandHelp", "httpAddressPolicy", "safeRegexp", "legacySqlite"));
   assert.throws(() => requireSdkFeatures("nope" as never), /Unsupported SDK feature: nope/);
+  assert.deepEqual(SAFE_REGEXP_LIMITS, {maxPatternLength: 512, maxInputLength: 4096, startupTimeoutMs: 1000,
+    executionTimeoutMs: 50, concurrency: 4, queueCapacity: 64});
 });
 
 test("authorization without subcommands rejects before the root business handler", async () => {

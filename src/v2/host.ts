@@ -10,6 +10,7 @@ import {DEFAULT_PROCESS_LIMITS, ProcessAbortedError, ProcessClosedError, resolve
   type ProcessLimits, type ProcessRunOptions} from "./processes";
 import {SettingsRegistry} from "./settings";
 import {ScopedFiles} from "./files";
+import {ScopedSafeRegExp} from "./safe-regexp";
 import { definePlugin, type CommandDefinition, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type MessageFilter, type TelegramPort } from "./sdk";
 import {renderRichText} from "./ui/document";
 import {renderCommandHelp, resolveHelpPath, type CommandHelpSource, type SubcommandDefinition, type SubcommandHelpSource} from "./commands";
@@ -28,7 +29,8 @@ function admitsMessage(message: MessageEnvelope, filter: MessageFilter | undefin
   return true;
 }
 
-interface PluginStorage { json: StorageRoot; sqlite: Map<string, {store: SqliteStore; readonly: boolean; timeoutMs: number}>; }
+interface SqliteEntry {store: SqliteStore; readonly: boolean; mustExist: boolean; timeoutMs: number}
+interface PluginStorage { json: StorageRoot; sqlite: Map<string, SqliteEntry>; legacySqlite: Map<string, SqliteEntry>; }
 interface LoadedPlugin { definition: PluginDefinition; scope: ResourceScope; storage: PluginStorage; context: PluginContext; ready: boolean; owner?: object; }
 interface CommandTarget { plugin: LoadedPlugin; name: string; }
 
@@ -88,6 +90,7 @@ export interface HostOptions {
 }
 
 export class PluginHost {
+  private readonly safeRegExp = new ScopedSafeRegExp();
   private readonly root = new ResourceScope();
   private readonly executor: KeyedExecutor;
   private readonly scheduler: PluginScheduler;
@@ -207,12 +210,15 @@ export class PluginHost {
   }
 
   private async closeStorage(storage: PluginStorage): Promise<void> {
-    await Promise.all([storage.json.close(), ...[...storage.sqlite.values()].map(value => value.store.close())]);
+    await Promise.all([storage.json.close(),
+      ...[...storage.sqlite.values(), ...storage.legacySqlite.values()].map(value => value.store.close())]);
     storage.sqlite.clear();
+    storage.legacySqlite.clear();
   }
 
   private contextFor(definition: PluginDefinition, scope: ResourceScope, storage: PluginStorage): PluginContext {
     const id = definition.id;
+    const allowedLegacySqlite = new Set(definition.legacyStorage?.sqlite ?? []);
     const combined = (signal: AbortSignal, caller?: AbortSignal) => caller ? AbortSignal.any([signal, caller]) : signal;
     const requested = definition.resources?.processes;
     const pluginProcessLimits = requested && resolveProcessLimits({
@@ -256,6 +262,31 @@ export class PluginHost {
         });
       });
     };
+    const sqliteCapability = (entries: Map<string, SqliteEntry>, file: string, target: string,
+      options: SqliteOptions, label: string): Pick<SqliteStore, "read" | "transaction" | "preflight"> => {
+      scope.signal.throwIfAborted();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\.(db|sqlite|sqlite3)$/.test(file)) throw new Error("Invalid plugin SQLite filename");
+      let entry = entries.get(file);
+      const readonly = options.readonly ?? false;
+      const mustExist = options.mustExist ?? false;
+      const timeoutMs = options.timeoutMs ?? 5000;
+      if (entry && (entry.readonly !== readonly || entry.mustExist !== mustExist || entry.timeoutMs !== timeoutMs)) {
+        throw new Error("SQLite store options conflict");
+      }
+      if (!entry) {
+        entry = {store: new SqliteStore(target, options), readonly, mustExist, timeoutMs};
+        entries.set(file, entry);
+      }
+      const sqlite = entry.store;
+      return Object.freeze({
+        read: <T>(callback: (db: SqliteConnection) => T, caller?: AbortSignal) =>
+          scope.run(`${label}:read`, signal => sqlite.read(callback, combined(signal, caller))),
+        transaction: <T>(callback: (db: SqliteConnection) => T, caller?: AbortSignal) =>
+          scope.run(`${label}:transaction`, signal => sqlite.transaction(callback, combined(signal, caller))),
+        preflight: (required?: Readonly<Record<string, readonly string[]>>, caller?: AbortSignal) =>
+          scope.run(`${label}:preflight`, signal => sqlite.preflight(required, combined(signal, caller))),
+      });
+    };
     return Object.freeze({
       signal: scope.signal, tasks: scope, log: this.options.logger,
       http: new ScopedHttp(scope, this.options.http),
@@ -268,26 +299,12 @@ export class PluginHost {
           update: (mutator: (current: T) => T | Promise<T>, caller?: AbortSignal) =>
             scope.run("storage:update", signal => store.update(mutator, combined(signal, caller))),
         });
-      }, sqlite: (file: string, options: SqliteOptions = {}): Pick<SqliteStore, "read" | "transaction" | "preflight"> => {
-        scope.signal.throwIfAborted();
-        if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\.(db|sqlite|sqlite3)$/.test(file)) throw new Error("Invalid plugin SQLite filename");
-        let entry = storage.sqlite.get(file);
-        const readonly = options.readonly ?? false;
-        const timeoutMs = options.timeoutMs ?? 5000;
-        if (entry && (entry.readonly !== readonly || entry.timeoutMs !== timeoutMs)) throw new Error("SQLite store options conflict");
-        if (!entry) {
-          entry = {store: new SqliteStore(path.join(this.options.storageRoot, id, file), options), readonly, timeoutMs};
-          storage.sqlite.set(file, entry);
-        }
-        const store = entry.store;
-        return Object.freeze({
-          read: <T>(callback: (db: SqliteConnection) => T, caller?: AbortSignal) =>
-            scope.run("sqlite:read", signal => store.read(callback, combined(signal, caller))),
-          transaction: <T>(callback: (db: SqliteConnection) => T, caller?: AbortSignal) =>
-            scope.run("sqlite:transaction", signal => store.transaction(callback, combined(signal, caller))),
-          preflight: (required?: Readonly<Record<string, readonly string[]>>, caller?: AbortSignal) =>
-            scope.run("sqlite:preflight", signal => store.preflight(required, combined(signal, caller))),
-        });
+      }, sqlite: (file: string, options: SqliteOptions = {}) =>
+        sqliteCapability(storage.sqlite, file, path.join(this.options.storageRoot, id, file), options, "sqlite"),
+      legacySqlite: (file: string, options: SqliteOptions = {}) => {
+        if (!allowedLegacySqlite.has(file)) throw new Error("Legacy SQLite file is not declared");
+        return sqliteCapability(storage.legacySqlite, file, path.join(this.options.storageRoot, file),
+          {...options, mustExist: true}, "legacy-sqlite");
       }},
       jobs: {register: (name: string, spec: ScheduledJob, handler: (signal: AbortSignal) => void | Promise<void>) =>
         this.scheduler.register(id, name, spec, scope, signal => this.executor.submit(`job:${id}:${name}`, () => {
@@ -318,6 +335,8 @@ export class PluginHost {
           }) as Promise<T>;
         }),
       },
+      regexp: Object.freeze({test: (pattern: string, input: string, options = {}, caller?: AbortSignal) =>
+        scope.run("regexp:test", signal => this.safeRegExp.test(pattern, input, options, combined(signal, caller)))}),
       telegram: {
         edit: (message: MessageEnvelope, text: string, options = {}) => scope.run("telegram:edit", signal => this.options.telegram.edit(message, text, options, signal)),
         reply: (message: MessageEnvelope, text: string, options = {}) => scope.run("telegram:reply", signal => this.options.telegram.reply(message, text, options, signal)),
@@ -338,7 +357,7 @@ export class PluginHost {
       if (this.commands.has(name)) throw new Error(`Command conflict: ${name}`);
     }
     const scope = new ResourceScope(this.root.signal);
-    const storage: PluginStorage = {json: new StorageRoot(this.options.storageRoot), sqlite: new Map()};
+    const storage: PluginStorage = {json: new StorageRoot(this.options.storageRoot), sqlite: new Map(), legacySqlite: new Map()};
     const context = this.contextFor(definition, scope, storage);
     const plugin: LoadedPlugin = {definition, scope, storage, context, ready: false, owner};
     this.plugins.set(definition.id, plugin);

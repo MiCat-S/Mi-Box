@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { inspect } from "node:util";
 import { gzipSync } from "node:zlib";
+import type {lookup as dnsLookup} from "node:dns";
 import test from "node:test";
 import { HttpError, HttpStatusError, ScopedHttp } from "./http";
 import { ResourceScope } from "./lifecycle";
@@ -103,6 +104,60 @@ test("passes URL objects and request fields intact, using the built-in fetch by 
   assert.equal(init.signal, undefined);
   assert.equal(mock.mock.callCount(), 1);
   await scope.drain();
+});
+
+test("public-address policy rejects literal private targets before fetch", async () => {
+  const scope = new ResourceScope();
+  let calls = 0;
+  const http = new ScopedHttp(scope, {fetch: async () => { calls += 1; return new Response("unexpected"); }});
+  for (const url of ["http://127.0.0.1/value", "http://169.254.169.254/value", "https://[::1]/value",
+    "https://[::ffff:7f00:1]/value", "https://[64:ff9b::7f00:1]/value",
+    "https://[64:ff9b:1::a9fe:a9fe]/value", "https://localhost/value"]) {
+    await assert.rejects(http.text(url, {}, {denyPrivateAddresses: true}), code("ADDRESS_BLOCKED"));
+  }
+  assert.equal(calls, 0);
+  assert.equal((await scope.drain()).completed, true);
+});
+
+test("public-address policy permits public IPv4-mapped and well-known NAT64 literals", async () => {
+  const scope = new ResourceScope();
+  const calls: string[] = [];
+  const http = new ScopedHttp(scope, {fetch: async url => {calls.push(String(url)); return new Response("ok");}});
+  for (const url of ["https://[::ffff:5db8:d822]/value", "https://[64:ff9b::5db8:d822]/value"]) {
+    assert.equal(await http.text(url, {}, {denyPrivateAddresses: true}), "ok");
+  }
+  assert.equal(calls.length, 2);
+  assert.equal((await scope.drain()).completed, true);
+});
+
+test("public-address policy validates redirect targets before following", async () => {
+  const scope = new ResourceScope();
+  let calls = 0;
+  const http = new ScopedHttp(scope, {fetch: async () => {
+    calls += 1;
+    return new Response(null, {status: 302, headers: {location: "http://127.0.0.1/private"}});
+  }});
+  await assert.rejects(http.text("https://public.invalid/start", {}, {
+    denyPrivateAddresses: true,
+    redirects: {allowedHosts: ["public.invalid", "127.0.0.1"]},
+  }), code("ADDRESS_BLOCKED"));
+  assert.equal(calls, 1);
+  assert.equal((await scope.drain()).completed, true);
+});
+
+test("public-address dispatcher rejects private and mixed DNS answers before connecting", async () => {
+  for (const addresses of [
+    [{address: "127.0.0.1", family: 4}],
+    [{address: "93.184.216.34", family: 4}, {address: "10.0.0.1", family: 4}],
+  ]) {
+    const scope = new ResourceScope();
+    const lookup = ((_hostname: string, _options: unknown, callback: Function) => callback(null, addresses)) as typeof dnsLookup;
+    const http = new ScopedHttp(scope, {lookup});
+    await assert.rejects(http.text("https://public-address-policy.invalid/value", {}, {
+      denyPrivateAddresses: true,
+    }), code("ADDRESS_BLOCKED"));
+    assert.equal((await scope.drain()).completed, true);
+  }
 });
 
 test("redirect policy validates every hop and strips credentials across origins", async () => {

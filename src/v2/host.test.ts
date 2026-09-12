@@ -9,6 +9,7 @@ import {SelfDrainError} from "./lifecycle";
 import {createHelp} from "./builtins/help";
 import {HTMLParser} from "teleproto/extensions/html.js";
 import {ProcessAbortedError} from "./processes";
+import {SqliteStore} from "./sqlite";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -356,6 +357,51 @@ test("services reject pre-cancelled calls without entering the provider", async 
     test: {description: "fixture", handle() { assert.fail("pre-cancelled service admitted"); }},
   }}));
   await assert.rejects(context.services.call("ping", "test", null, AbortSignal.abort()));
+});
+
+test("plugin context runs untrusted regular expressions outside the event loop", async t => {
+  const {host} = await fixture(t);
+  let context!: PluginContext;
+  await host.load(plugin(() => {}, {setup(value) { context = value; }}));
+  assert.deepEqual(await context.regexp.test("^hello$", "HELLO", {flags: "i"}), {matched: true, timedOut: false});
+  assert.deepEqual(await context.regexp.test("(a+)+$", `${"a".repeat(30)}!`), {matched: false, timedOut: true});
+  await host.unload("ping");
+  await assert.rejects(context.regexp.test("x", "x"), {name: "AbortError"});
+});
+
+test("plugin unload cancels queued regexp work and waits for started workers to terminate", async t => {
+  const {host} = await fixture(t);
+  let context!: PluginContext;
+  await host.load(plugin(() => {}, {setup(value) { context = value; }}));
+  const calls = Array.from({length: 8}, () => context.regexp.test("(a+)+$", `${"a".repeat(30)}!`));
+  const report = await host.unload("ping", 2000);
+  assert.equal(report?.completed, true);
+  const results = await Promise.allSettled(calls);
+  assert.equal(results.every(result => result.status === "rejected" && result.reason?.name === "AbortError"), true);
+});
+
+test("legacy SQLite access is exact, declared and scoped to the account storage root", async t => {
+  const {host, root} = await fixture(t);
+  const seed = new SqliteStore(path.join(root, "legacy-config.db"));
+  await seed.transaction(db => {
+    db.exec("CREATE TABLE config(key TEXT PRIMARY KEY, value TEXT)");
+    db.prepare("INSERT INTO config(key, value) VALUES (?, ?)").run("secret", "fixture");
+  });
+  await seed.close();
+  let context!: PluginContext;
+  await host.load(plugin(() => {}, {
+    legacyStorage: {sqlite: ["legacy-config.db", "missing.db"]},
+    setup(value) { context = value; },
+  }));
+  assert.throws(() => context.storage.legacySqlite("other.db"), /not declared/);
+  const legacy = context.storage.legacySqlite("legacy-config.db");
+  assert.equal(await legacy.read(db => db.prepare("SELECT value FROM config WHERE key = ?").pluck().get("secret")), "fixture");
+  await legacy.transaction(db => { db.prepare("UPDATE config SET value = '' WHERE key = ?").run("secret"); });
+  assert.equal(await legacy.read(db => db.prepare("SELECT value FROM config WHERE key = ?").pluck().get("secret")), "");
+  await assert.rejects(context.storage.legacySqlite("missing.db").transaction(() => undefined), {code: "ENOENT"});
+  await assert.rejects(stat(path.join(root, "missing.db")), {code: "ENOENT"});
+  await host.unload("ping");
+  await assert.rejects(legacy.read(() => undefined));
 });
 
 test("declarative jobs belong to their plugin generation", async t => {
