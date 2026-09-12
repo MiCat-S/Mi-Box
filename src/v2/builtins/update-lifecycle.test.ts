@@ -26,6 +26,7 @@ async function fixture(t: TestContext, options: {
   edit?: (message: MessageEnvelope, text: string) => void | Promise<void>;
   resultTimeoutMs?: number;
   gitVersions?: Readonly<Record<string, string>>;
+  onSuccessfulUpdate?: (trigger: {id: string; source: "manual" | "automatic"}) => void | Promise<void>;
 } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "mibot-update-lifecycle-")));
   const scope = new ResourceScope();
@@ -71,7 +72,8 @@ async function fixture(t: TestContext, options: {
     },
   } as unknown as PluginContext;
   const plugin = createUpdate(root, "1", {pollIntervalMs: 5,
-    resultTimeoutMs: options.resultTimeoutMs ?? 50, startupGraceMs: 10});
+    resultTimeoutMs: options.resultTimeoutMs ?? 50, startupGraceMs: 10,
+    onSuccessfulUpdate: options.onSuccessfulUpdate});
   await plugin.setup?.(ctx);
   const descriptor = Object.getOwnPropertyDescriptor(process, "getuid");
   Object.defineProperty(process, "getuid", {value: () => 0, configurable: true});
@@ -171,8 +173,39 @@ test("a successful no-op update reports that no code changed", async t => {
   assert.match(f.edits.at(-1)!.text, /0\.7\.6/);
 });
 
+test("a recovered successful manual update emits its request id once", async t => {
+  const triggers: {id: string; source: string}[] = [];
+  const f = await fixture(t, {activeState: "inactive", onSuccessfulUpdate: trigger => { triggers.push(trigger); }});
+  const requestId = "12345678-1234-4234-8234-123456789abc";
+  await f.receipts.update(() => ({pending: {ownerId: "1", chatId: "1", messageId: 15,
+    requestedAt: Date.now(), bootId: "previous", requestId}}));
+  await fs.mkdir(path.join(f.root, "temp"), {recursive: true});
+  await fs.writeFile(path.join(f.root, "temp/update-result.json"), JSON.stringify({
+    status: "success", requestId, previousRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+  }));
+  await f.plugin.notifyReady();
+  await waitFor(async () => (await f.receipts.read()).pending === null);
+  assert.deepEqual(triggers, [{id: `manual:${requestId}`, source: "manual"}]);
+  await f.plugin.notifyReady();
+  assert.equal(triggers.length, 1);
+});
+
+test("a failed manual update never emits a successful-update trigger", async t => {
+  const triggers: unknown[] = [];
+  const f = await fixture(t, {activeState: "inactive", onSuccessfulUpdate: trigger => { triggers.push(trigger); }});
+  const requestId = "12345678-1234-4234-8234-123456789abc";
+  await f.receipts.update(() => ({pending: {ownerId: "1", chatId: "1", messageId: 16,
+    requestedAt: Date.now(), bootId: "previous", requestId}}));
+  await fs.mkdir(path.join(f.root, "temp"), {recursive: true});
+  await fs.writeFile(path.join(f.root, "temp/update-result.json"), JSON.stringify({status: "failed", requestId}));
+  await f.plugin.notifyReady();
+  await waitFor(async () => (await f.receipts.read()).pending === null);
+  assert.deepEqual(triggers, []);
+});
+
 test("automatic update results are sent once to Saved Messages", async t => {
-  const f = await fixture(t, {activeState: "inactive"});
+  const triggers: {id: string; source: string}[] = [];
+  const f = await fixture(t, {activeState: "inactive", onSuccessfulUpdate: trigger => { triggers.push(trigger); }});
   const automaticId = "c".repeat(64);
   await fs.writeFile(path.join(f.root, "package.json"), JSON.stringify({version: "0.7.7"}));
   await fs.writeFile(path.join(f.root, "CHANGELOG.md"),
@@ -192,9 +225,25 @@ test("automatic update results are sent once to Saved Messages", async t => {
   assert.match(f.automaticMessages[0].text, /自动更新成功/);
   assert.match(f.automaticMessages[0].text, /自动监测 GitHub 更新/);
   assert.equal((await f.autoConfig.read()).lastResultId, automaticId);
+  assert.deepEqual(triggers, [{id: `automatic:${automaticId}`, source: "automatic"}]);
 
   await f.plugin.jobs!.automaticResult.handle(f.ctx, f.scope.signal);
   assert.equal(f.automaticMessages.length, 1);
+  assert.equal(triggers.length, 1);
+});
+
+test("an automatic success without a new revision does not emit a follow-up trigger", async t => {
+  const triggers: unknown[] = [];
+  const f = await fixture(t, {activeState: "inactive", onSuccessfulUpdate: trigger => { triggers.push(trigger); }});
+  const automaticId = "e".repeat(64);
+  await fs.mkdir(path.join(f.root, "temp"), {recursive: true});
+  await fs.writeFile(path.join(f.root, "temp/automatic-update-result.json"), JSON.stringify({
+    status: "success", reason: "", trigger: "automatic", automaticId,
+    previousRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+  }));
+  await f.plugin.notifyReady();
+  await waitFor(() => f.automaticMessages.length === 1);
+  assert.deepEqual(triggers, []);
 });
 
 test("legacy receipts ignore an older id-less result but accept a fresh 0.7.1 result", async t => {

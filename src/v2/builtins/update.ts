@@ -18,8 +18,18 @@ type UpdateState = {pending: Receipt | null};
 type UpdateResult = {status: "success" | "failed"; reason?: string | null; requestId?: string;
   previousVersion?: string; currentVersion?: string; previousRevision?: string; currentRevision?: string;
   trigger?: "automatic"; automaticId?: string};
-interface AutoConfig extends Record<string, unknown> {enabled: boolean; lastResultId?: string;}
-interface UpdateRuntimeOptions {pollIntervalMs?: number; resultTimeoutMs?: number; startupGraceMs?: number; now?: () => number;}
+interface AutoConfig extends Record<string, unknown> {enabled: boolean; lastResultId?: string; lastFollowupId?: string;}
+export interface SuccessfulUpdateTrigger {
+  readonly id: string;
+  readonly source: "manual" | "automatic";
+}
+interface UpdateRuntimeOptions {
+  pollIntervalMs?: number;
+  resultTimeoutMs?: number;
+  startupGraceMs?: number;
+  now?: () => number;
+  onSuccessfulUpdate?: (trigger: SuccessfulUpdateTrigger) => void | Promise<void>;
+}
 type ServiceStatusRow = {key: string; value: string};
 type ServiceStatusField = "LoadState" | "ActiveState" | "UnitFileState" | "SubState" | "CanStart" | "FragmentPath" | "Result";
 export interface ChangelogRelease {readonly version: string; readonly entries: readonly string[];}
@@ -85,6 +95,16 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
   // Legacy 0.7.1 results have no request ID, so use their file time to reject pre-existing output.
   const legacyResultClockToleranceMs = 1000;
   const now = options.now ?? Date.now;
+  const followSuccessfulUpdate = async (ctx: PluginContext, trigger: SuccessfulUpdateTrigger): Promise<void> => {
+    try {
+      await options.onSuccessfulUpdate?.(trigger);
+    } catch (error) {
+      if (!ctx.signal.aborted) ctx.log.error("update.success_hook_failed", {
+        source: trigger.source, kind: error instanceof Error ? error.name : "unknown",
+      });
+      throw error;
+    }
+  };
   const exclusive = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = stateOperation.then(operation, operation);
     stateOperation = result.then(() => undefined, () => undefined);
@@ -333,6 +353,16 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     return brandText(`<b>MiBot 更新失败</b>\n更新未完成，请查看 <code>.update check</code> 或服务器日志。${
       detail ? `\n原因：${escapeHtml(detail)}` : ""}`);
   };
+  const manualTriggerId = (receipt: Receipt): string => receipt.requestId ??
+    `${receipt.bootId}:${receipt.requestedAt}:${receipt.chatId}:${receipt.messageId}`;
+  const finalizeUpdateResult = async (ctx: PluginContext, receipt: Receipt,
+    result: Partial<UpdateResult>): Promise<boolean> => {
+    if (!sameReceipt((await store(ctx).read()).pending, receipt)) return false;
+    if (result.status === "success") {
+      await followSuccessfulUpdate(ctx, {id: `manual:${manualTriggerId(receipt)}`, source: "manual"});
+    }
+    return finalizeReceipt(ctx, receipt, await finalText(ctx, result));
+  };
   const automaticFinalText = async (ctx: PluginContext, result: Partial<UpdateResult>): Promise<string> => {
     if (result.status === "success") {
       const details = await successfulUpdateDetails(ctx, result);
@@ -361,7 +391,14 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
   const deliverAutomaticResultNow = async (ctx: PluginContext): Promise<void> => {
     const result = await readAutomaticResult();
     if (!result?.automaticId) return;
-    const config = await autoStore(ctx).read();
+    let config = await autoStore(ctx).read();
+    const previousRevision = validRevision(result.previousRevision);
+    const currentRevision = validRevision(result.currentRevision);
+    if (result.status === "success" && previousRevision && currentRevision && previousRevision !== currentRevision &&
+        config.lastFollowupId !== result.automaticId) {
+      await followSuccessfulUpdate(ctx, {id: `automatic:${result.automaticId}`, source: "automatic"});
+      config = await autoStore(ctx).update(current => ({...current, lastFollowupId: result.automaticId}));
+    }
     if (config.lastResultId === result.automaticId) return;
     const text = await automaticFinalText(ctx, result);
     try {
@@ -397,14 +434,12 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       if (!owned) return;
       const result = await readMatchingResult(receipt);
       if (result?.status === "failed") {
-        const text = await finalText(ctx, result);
-        await exclusive(() => finalizeReceipt(ctx, receipt, text));
+        await exclusive(() => finalizeUpdateResult(ctx, receipt, result));
         return;
       }
       if (result?.status === "success") {
         if (mode === "recovery") {
-          const text = await finalText(ctx, result);
-          await exclusive(() => finalizeReceipt(ctx, receipt, text));
+          await exclusive(() => finalizeUpdateResult(ctx, receipt, result));
         }
         else {
           // Success is written after mibot.service restarts; the next boot owns final notification and clearing.
@@ -602,7 +637,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     const existing = (await store(ctx).read()).pending;
     if (existing && validReceipt(existing)) {
       const result = await readMatchingResult(existing);
-      if (result) await finalizeReceipt(ctx, existing, await finalText(ctx, result));
+      if (result) await finalizeUpdateResult(ctx, existing, result);
       else if (serviceEnded(activeState)) await finalizeReceipt(ctx, existing, missingResultText());
     } else if (existing) {
       await clear(ctx, existing);

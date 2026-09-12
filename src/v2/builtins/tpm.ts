@@ -1,4 +1,6 @@
 import path from "node:path";
+import {setTimeout as delay} from "node:timers/promises";
+import {Api} from "teleproto";
 import {getBotName} from "../branding";
 import {definePlugin, STRUCTURED_PLUGIN_API_VERSION, type CommandDefinition, type CommandInvocation, type PluginContext} from "../sdk";
 import type {PluginHost} from "../host";
@@ -12,6 +14,50 @@ import {renderCommandHelp, type HelpSection} from "../commands";
 
 const htmlOptions = {parseMode: "html", linkPreview: false} as const;
 type Candidate = {id: string; revision?: string; error?: string; ids?: readonly string[]};
+export interface TpmSuccessfulUpdateTrigger {
+  readonly id: string;
+  readonly source: "manual" | "automatic";
+}
+type AutoFailure = {id: string; code: string};
+type AutoBatch = {
+  trigger: TpmSuccessfulUpdateTrigger;
+  createdAt: number;
+  startedAt?: number;
+  targets?: string[];
+  updated: string[];
+  unchanged: string[];
+  failed: AutoFailure[];
+  inFlight?: {id: string; revision: string};
+};
+type AutoResult = {
+  triggerId: string;
+  source: TpmSuccessfulUpdateTrigger["source"];
+  startedAt: number;
+  completedAt: number;
+  targets: number;
+  updated: string[];
+  unchanged: string[];
+  failed: AutoFailure[];
+  failure?: {stage: "repository"; code: string};
+};
+type AutoNotification = {id: string; triggerId: string; text: string};
+interface TpmAutoState extends Record<string, unknown> {
+  schemaVersion: 1;
+  enabled: boolean;
+  pending: AutoBatch[];
+  processedTriggerIds: string[];
+  notifications: AutoNotification[];
+  lastResult?: AutoResult;
+}
+
+const defaultAutoState: TpmAutoState = {
+  schemaVersion: 1,
+  enabled: false,
+  pending: [],
+  processedTriggerIds: [],
+  notifications: [],
+};
+const revisionPattern = /^[a-f0-9]{64}$/;
 
 function descriptionFor(descriptions: Readonly<Record<string, string>>, id: string): string {
   return Object.hasOwn(descriptions, id) && typeof descriptions[id] === "string" ? descriptions[id] : "";
@@ -81,6 +127,7 @@ const tpmHelpSections: readonly HelpSection[] = Object.freeze([
       "• 插件名为 1–64 位字母、数字、下划线或连字符，以字母或数字开头；可直接复制搜索结果中的名称。\n" +
       "• 名称优先精确匹配，其次忽略大小写匹配。例如 git_pr 可匹配 git_PR，配置仍使用声明名称。出现大小写冲突时，复制提示中的完整名称执行单项操作。\n" +
       "• 安装、更新、卸载及仓库搜索由账号本人操作；支持本账号在群内以频道身份发出的新命令。\n" +
+      "• <code>{prefix}tpm auto on</code> 独立控制插件跟随更新。启用后，主程序更新成功会检查当前已安装扩展；有更新或失败时将结果发送到 Saved Messages。\n" +
       "• 同时只运行一个插件管理任务。批量操作逐项执行，单个插件失败后继续处理其余插件，最后汇总成功、跳过和失败项。\n" +
       "• 批量下载或构建整体失败时，请检查仓库连接后重试；个别插件失败时，可按结果中的名称单独重试。长列表会分多条消息显示。",
   },
@@ -95,7 +142,26 @@ const tpmHelpSections: readonly HelpSection[] = Object.freeze([
 ]);
 
 export default function createTpm(host: PluginHost, releases: PluginReleases, root: string, ownerId: string) {
-  let busy = false;
+  let context: PluginContext | undefined;
+  let recoveryStarted = false;
+  let busy: "manual" | "automatic" | undefined;
+  let autoTask: Promise<void> | undefined;
+  let notificationOperation: Promise<void> = Promise.resolve();
+  const autoStore = (ctx: PluginContext) => ctx.storage.json<TpmAutoState>("auto-update.json", defaultAutoState);
+  const pendingOf = (state: TpmAutoState): AutoBatch[] => Array.isArray(state.pending) ? state.pending : [];
+  const processedOf = (state: TpmAutoState): string[] => Array.isArray(state.processedTriggerIds)
+    ? state.processedTriggerIds.filter(value => typeof value === "string") : [];
+  const notificationsOf = (state: TpmAutoState): AutoNotification[] => Array.isArray(state.notifications)
+    ? state.notifications.filter(item => !!item && typeof item.id === "string" &&
+      typeof item.triggerId === "string" && typeof item.text === "string") : [];
+  const patchBatch = async (ctx: PluginContext, triggerId: string,
+    mutate: (batch: AutoBatch) => AutoBatch): Promise<void> => {
+    await autoStore(ctx).update(current => ({...current, schemaVersion: 1,
+      pending: pendingOf(current).map(batch => batch.trigger.id === triggerId ? mutate(batch) : batch),
+      processedTriggerIds: processedOf(current), notifications: notificationsOf(current),
+      enabled: current.enabled === true,
+    }));
+  };
   const repository = async (ctx: PluginContext, action: string, ...ids: string[]) => {
     const result = await ctx.processes.run(process.execPath, [path.join(root, "scripts/plugin-repository.cjs"), action, ...ids],
       {timeoutMs: ["build-all", "build-selected"].includes(action) ? 180000 : 30000, maxOutputBytes: 65536});
@@ -117,7 +183,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       await ctx.telegram.edit(invocation.message, "插件管理任务正在执行，请稍后再试");
       return;
     }
-    busy = true;
+    busy = "manual";
     let stage = "repository";
     try {
       await operation(value => { stage = value; });
@@ -137,8 +203,241 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           : "请稍后重试或查看服务器日志",
       }), htmlOptions);
     } finally {
-      busy = false;
+      busy = undefined;
     }
+  };
+
+  const waitForManualOperation = async (signal: AbortSignal): Promise<void> => {
+    while (busy === "manual") await delay(25, undefined, {signal});
+    signal.throwIfAborted();
+  };
+
+  const autoFailureCode = (candidate: Candidate): string => candidate.error === "AMBIGUOUS" ? "AMBIGUOUS"
+    : candidate.error === "NOT_FOUND" || candidate.error === "NOT_AVAILABLE" ? "NOT_AVAILABLE" : "BUILD";
+  const clearInFlight = (batch: AutoBatch): AutoBatch => {
+    const {inFlight: _inFlight, ...rest} = batch;
+    return rest;
+  };
+
+  const validateAutoCandidates = (targets: readonly string[], result: {
+    ids?: string[]; candidates?: Candidate[];
+  }): Candidate[] => {
+    if (!Array.isArray(result.ids) || !Array.isArray(result.candidates) ||
+        result.ids.some(value => typeof value !== "string" || !isPluginId(value)) ||
+        result.candidates.length !== targets.length ||
+        new Set(result.candidates.map(item => item?.id)).size !== targets.length ||
+        result.candidates.some(item => !item || typeof item.id !== "string" || !targets.includes(item.id) ||
+          !isPluginId(item.id) || item.revision !== undefined && !revisionPattern.test(item.revision))) {
+      throw Object.assign(new Error("Invalid automatic update candidates"), {code: "FORMAT"});
+    }
+    return result.candidates;
+  };
+
+  const renderAutoNotifications = async (result: AutoResult): Promise<readonly string[]> => {
+    const failures: Html[] = result.failed.map(item => concat(code(item.id), text(` · ${item.code}`)));
+    if (result.failure) failures.unshift(text(`仓库构建 · ${result.failure.code}`));
+    const output = await renderDocument({
+      title: `${getBotName()} 插件跟随更新完成`,
+      subtitle: `已更新 ${result.updated.length} · 保持最新 ${result.unchanged.length} · 失败 ${failures.length}`,
+      sections: [
+        ...(failures.length ? [section("更新失败", failures)] : []),
+        ...(result.updated.length ? [section(`已更新 · ${result.updated.length}`, await compactList(result.updated))] : []),
+      ],
+      footer: [text(`已检查 ${result.targets} 个已安装扩展`)],
+    }, PAGE_LABEL_RESERVE);
+    return output.map((page, index) => page + pageLabel(index, output.length));
+  };
+
+  const deliverNotificationsNow = async (ctx: PluginContext): Promise<void> => {
+    while (true) {
+      ctx.signal.throwIfAborted();
+      const notification = notificationsOf(await autoStore(ctx).read())[0];
+      if (!notification) return;
+      try {
+        await ctx.telegram.withClient(async client => {
+          await client.sendMessage(new Api.InputPeerSelf(), {
+            message: notification.text, parseMode: "html", linkPreview: false, silent: true,
+          });
+        });
+      } catch {
+        if (!ctx.signal.aborted) ctx.log.error("tpm.auto_notification_failed");
+        return;
+      }
+      await autoStore(ctx).update(current => ({...current, schemaVersion: 1,
+        enabled: current.enabled === true, pending: pendingOf(current), processedTriggerIds: processedOf(current),
+        notifications: notificationsOf(current).filter(item => item.id !== notification.id),
+      }));
+    }
+  };
+
+  const deliverNotifications = (ctx: PluginContext): Promise<void> => {
+    const delivery = notificationOperation.then(() => deliverNotificationsNow(ctx));
+    notificationOperation = delivery.catch(() => undefined);
+    return delivery;
+  };
+
+  const completeAutoBatch = async (ctx: PluginContext, batch: AutoBatch,
+    failure?: AutoResult["failure"]): Promise<void> => {
+    const result: AutoResult = {
+      triggerId: batch.trigger.id,
+      source: batch.trigger.source,
+      startedAt: batch.startedAt ?? batch.createdAt,
+      completedAt: Date.now(),
+      targets: batch.targets?.length ?? 0,
+      updated: [...new Set(batch.updated)].sort(),
+      unchanged: [...new Set(batch.unchanged)].sort(),
+      failed: [...batch.failed].sort((a, b) => a.id.localeCompare(b.id)),
+      ...(failure ? {failure} : {}),
+    };
+    const shouldNotify = result.updated.length > 0 || result.failed.length > 0 || !!result.failure;
+    const pages = shouldNotify ? await renderAutoNotifications(result) : [];
+    await autoStore(ctx).update(current => {
+      const processed = [...processedOf(current).filter(id => id !== batch.trigger.id), batch.trigger.id].slice(-64);
+      return {...current, schemaVersion: 1, enabled: current.enabled === true,
+        pending: pendingOf(current).filter(item => item.trigger.id !== batch.trigger.id),
+        processedTriggerIds: processed,
+        notifications: shouldNotify
+          ? [...notificationsOf(current).filter(item => item.triggerId !== batch.trigger.id),
+            ...pages.map((text, index) => ({id: `${batch.trigger.id}:${index}`, triggerId: batch.trigger.id, text}))]
+          : notificationsOf(current),
+        lastResult: result,
+      };
+    });
+    await deliverNotifications(ctx);
+  };
+
+  const runAutoBatch = async (ctx: PluginContext, initial: AutoBatch, signal: AbortSignal): Promise<void> => {
+    await waitForManualOperation(signal);
+    if (busy) throw new Error("Automatic TPM operation collided with another task");
+    busy = "automatic";
+    try {
+      let batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
+      if (!batch) return;
+      if (!batch.targets) {
+        const targets = [...new Set(releases.snapshot().generations
+          .filter(item => item.state === "active").map(item => item.id))].sort();
+        await patchBatch(ctx, batch.trigger.id, current => ({...current, startedAt: Date.now(), targets}));
+        batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
+        if (!batch) return;
+      }
+      const targets = batch.targets ?? [];
+      if (!targets.length) {
+        await completeAutoBatch(ctx, batch);
+        return;
+      }
+      let candidates: Candidate[];
+      try {
+        candidates = validateAutoCandidates(targets, await repository(ctx, "build-selected", ...targets));
+      } catch (error) {
+        signal.throwIfAborted();
+        batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id) ?? batch;
+        await completeAutoBatch(ctx, batch, {stage: "repository", code: errorCode(error)});
+        return;
+      }
+      batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
+      if (!batch) return;
+      if (batch.inFlight) {
+        const candidate = candidates.find(item => item.id === batch!.inFlight!.id);
+        const current = releases.snapshot().generations.find(item => item.id === batch!.inFlight!.id && item.state === "active");
+        const completed = candidate?.revision === batch.inFlight.revision && current?.revision === batch.inFlight.revision;
+        await patchBatch(ctx, batch.trigger.id, value => ({...clearInFlight(value),
+          ...(completed ? {updated: [...value.updated, value.inFlight!.id]} : {}),
+        }));
+      }
+      for (const candidate of candidates) {
+        signal.throwIfAborted();
+        batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
+        if (!batch) return;
+        if ([...batch.updated, ...batch.unchanged, ...batch.failed.map(item => item.id)].includes(candidate.id)) continue;
+        const current = releases.snapshot().generations.find(item => item.id === candidate.id && item.state === "active");
+        if (batch.inFlight?.id === candidate.id && batch.inFlight.revision === candidate.revision &&
+            current?.revision === candidate.revision) {
+          await patchBatch(ctx, batch.trigger.id, value => ({
+            ...clearInFlight(value), updated: [...value.updated, candidate.id],
+          }));
+          continue;
+        }
+        if (candidate.error || !candidate.revision) {
+          await patchBatch(ctx, batch.trigger.id, value => ({
+            ...clearInFlight(value), failed: [...value.failed, {id: candidate.id, code: autoFailureCode(candidate)}],
+          }));
+          continue;
+        }
+        if (current?.revision === candidate.revision) {
+          await patchBatch(ctx, batch.trigger.id, value => ({
+            ...clearInFlight(value), unchanged: [...value.unchanged, candidate.id],
+          }));
+          continue;
+        }
+        await patchBatch(ctx, batch.trigger.id, value => ({...value,
+          inFlight: {id: candidate.id, revision: candidate.revision!},
+        }));
+        try {
+          await releases.activate(candidate.id, candidate.revision);
+          await patchBatch(ctx, batch.trigger.id, value => ({
+            ...clearInFlight(value), updated: [...value.updated, candidate.id],
+          }));
+        } catch (error) {
+          signal.throwIfAborted();
+          const failure = errorCode(error);
+          ctx.log.error("tpm.auto_batch_failed", {id: candidate.id, code: failure});
+          await patchBatch(ctx, batch.trigger.id, value => ({
+            ...clearInFlight(value), failed: [...value.failed, {id: candidate.id, code: failure}],
+          }));
+        }
+      }
+      batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
+      if (batch) await completeAutoBatch(ctx, batch);
+    } finally {
+      busy = undefined;
+    }
+  };
+
+  const processAutoQueue = async (ctx: PluginContext, signal: AbortSignal): Promise<void> => {
+    await deliverNotifications(ctx);
+    while (true) {
+      signal.throwIfAborted();
+      const batch = pendingOf(await autoStore(ctx).read())[0];
+      if (!batch) return;
+      await runAutoBatch(ctx, batch, signal);
+    }
+  };
+
+  const ensureAutoTask = (ctx: PluginContext): void => {
+    if (autoTask || ctx.signal.aborted) return;
+    const task = ctx.tasks.run("tpm:auto-update", signal => processAutoQueue(ctx, signal));
+    autoTask = task;
+    void task.catch(() => {
+      if (!ctx.signal.aborted) ctx.log.error("tpm.auto_update_failed");
+    }).finally(async () => {
+      autoTask = undefined;
+      if (ctx.signal.aborted) return;
+      try {
+        if (pendingOf(await autoStore(ctx).read()).length) ensureAutoTask(ctx);
+      } catch {
+        if (!ctx.signal.aborted) ctx.log.error("tpm.auto_recovery_failed");
+      }
+    });
+  };
+
+  const followSuccessfulUpdate = async (trigger: TpmSuccessfulUpdateTrigger): Promise<void> => {
+    const ctx = context;
+    if (!ctx || !trigger || !["manual", "automatic"].includes(trigger.source) ||
+        typeof trigger.id !== "string" || !trigger.id || trigger.id.length > 256 || trigger.id.includes("\0")) return;
+    let accepted = false;
+    await autoStore(ctx).update(current => {
+      const pending = pendingOf(current);
+      const processed = processedOf(current);
+      const duplicate = processed.includes(trigger.id) || pending.some(batch => batch.trigger.id === trigger.id);
+      if (current.enabled !== true || duplicate) return {...current, schemaVersion: 1,
+        enabled: current.enabled === true, pending, processedTriggerIds: processed, notifications: notificationsOf(current)};
+      accepted = true;
+      return {...current, schemaVersion: 1, enabled: true, processedTriggerIds: processed,
+        notifications: notificationsOf(current), pending: [...pending, {
+          trigger: {...trigger}, createdAt: Date.now(), updated: [], unchanged: [], failed: [],
+        }]};
+    });
+    if (accepted) ensureAutoTask(ctx);
   };
 
   const sendPages = async (ctx: PluginContext, invocation: CommandInvocation, output: readonly string[]): Promise<void> => {
@@ -337,6 +636,29 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     });
   };
 
+  const formatAutoTime = (value: number): string => new Date(value).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  const autoStatus = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
+    const action = invocation.args[0]?.toLowerCase();
+    if (invocation.args.length > 1 || action && action !== "on" && action !== "off") {
+      await ctx.telegram.edit(invocation.message, `用法：${invocation.prefix}tpm auto [on|off]`);
+      return;
+    }
+    if (action) {
+      await autoStore(ctx).update(current => ({...current, schemaVersion: 1, enabled: action === "on",
+        pending: pendingOf(current), processedTriggerIds: processedOf(current), notifications: notificationsOf(current),
+      }));
+    }
+    const state = await autoStore(ctx).read();
+    const last = state.lastResult;
+    const result = last
+      ? `已更新 ${last.updated.length} · 保持最新 ${last.unchanged.length} · 失败 ${last.failed.length + (last.failure ? 1 : 0)}`
+      : "尚未运行";
+    await ctx.telegram.edit(invocation.message,
+      `<b>插件跟随更新：${state.enabled === true ? "开启" : "关闭"}</b>\n` +
+      `待处理批次：${pendingOf(state).length}${busy === "automatic" ? "（正在执行）" : ""}\n` +
+      `最近运行：${last ? formatAutoTime(last.completedAt) : "无"}\n最近结果：${result}`, htmlOptions);
+  };
+
   const tpmHelpOptions = (prefix: string) => ({
     prefix,
     title: bold(`📦 ${getBotName()} 插件管理器（TPM）`),
@@ -383,6 +705,13 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         examples: [{args: "update nezha", description: "更新后继续使用原有配置。"}],
         handle: (invocation, ctx) => mutate(invocation, ctx, "update"),
       },
+      auto: {
+        group: "🔄 更新插件", args: "[on|off]",
+        description: "查看或控制主程序更新成功后的插件跟随更新；仅处理当前已安装扩展。",
+        arguments: [{name: "on|off", description: "省略时查看状态、最近运行时间和最近结果。"}],
+        examples: [{args: "auto"}, {args: "auto on"}, {args: "auto off"}],
+        handle: autoStatus,
+      },
       remove: {
         group: "🗑️ 卸载插件", aliases: ["rm"], args: "插件名 [插件名 ...]",
         alternates: [{args: "all", description: "卸载全部已安装扩展，保留各插件配置数据；默认模块继续由程序管理。"}],
@@ -394,15 +723,31 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     help: tpmHelpSections,
     handle: async (invocation, ctx) => {
       await ctx.telegram.edit(invocation.message,
-        `${invocation.prefix}tpm search [关键词]\n${invocation.prefix}tpm install|remove|update 插件名 [插件名 ...]\n${invocation.prefix}tpm install|update|remove all\n${invocation.prefix}tpm list`);
+        `${invocation.prefix}tpm search [关键词]\n${invocation.prefix}tpm install|remove|update 插件名 [插件名 ...]\n${invocation.prefix}tpm install|update|remove all\n${invocation.prefix}tpm auto [on|off]\n${invocation.prefix}tpm list`);
     },
   };
 
-  return definePlugin({
+  const definition = definePlugin({
     apiVersion: STRUCTURED_PLUGIN_API_VERSION,
     id: "tpm",
     description: "安装、卸载和更新 V2 扩展插件",
     renderHelp: prefix => buildHelp(prefix),
+    setup(ctx) { context = ctx; },
+    cleanup() { context = undefined; },
     commands: {tpm: tpmCommand},
+    jobs: {autoNotification: {
+      cron: "* * * * *",
+      description: "恢复 TPM 跟随更新任务并发送待处理结果",
+      async handle(ctx) {
+        ensureAutoTask(ctx);
+        await deliverNotifications(ctx);
+      },
+    }},
   });
+  return Object.freeze({...definition, followSuccessfulUpdate, async notifyReady(): Promise<void> {
+    const ctx = context;
+    if (!ctx || recoveryStarted) return;
+    recoveryStarted = true;
+    ensureAutoTask(ctx);
+  }});
 }

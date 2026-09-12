@@ -151,8 +151,9 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     await host.load(createSudo(selfId));
     const selection = releaseStorage.json<ReleaseState>("tpm", "releases.json", {schemaVersion: 1, plugins: {}});
     releases = new PluginReleases(host, {artifactRoot: path.join(root, "dist/v2-plugins"), store: selection});
-    await host.load(createTpm(host, releases, root, selfId));
-    const update = createUpdate(root, selfId);
+    const tpm = createTpm(host, releases, root, selfId);
+    await host.load(tpm);
+    const update = createUpdate(root, selfId, {onSuccessfulUpdate: trigger => tpm.followSuccessfulUpdate(trigger)});
     await host.load(update);
     await host.load(createAutofix(root));
     for (const [id, selected] of Object.entries((await selection.read()).plugins)) {
@@ -173,6 +174,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
       extensions: plugins.length});
     const stopped = waitForStop(options.signals ?? ["SIGINT", "SIGTERM"], rootScope);
     await restart.notifyReady();
+    await tpm.notifyReady();
     await update.notifyReady();
     reason = await stopped;
   } catch (error) {
