@@ -32,7 +32,7 @@ test("AI extensions install through TPM, handle offline media and restore from s
     async getMe() {return {className: "User", id: 123n, self: true};},
     async getInputEntity(value: unknown) {return value;},
     async deleteMessages(_peer: unknown, ids: number[]) {deleted.push([...ids]); return [];},
-    async sendMessage() {return {id: 700};},
+    async sendMessage(_peer: unknown, options: {message?: string; replyTo?: number}) {output.push(options?.message ?? ""); return {id: 700};},
     async editMessage() {return {};},
     async sendFile(_peer: unknown, options: {file?: {name?: string}}) {files.push(options.file?.name ?? ""); return {};},
     async invoke(request: {className?: string}) {
