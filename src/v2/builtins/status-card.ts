@@ -1,4 +1,5 @@
 import {existsSync} from "node:fs";
+import path from "node:path";
 import type {StatusSnapshot} from "./status";
 
 type CanvasModule = typeof import("canvas");
@@ -9,7 +10,7 @@ export const STATUS_CARD_HEIGHT = 900;
 
 const FONT_FAMILY = "TeleBoxStatusCJK";
 const FONT_STACK = `"${FONT_FAMILY}", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", "Droid Sans Fallback", sans-serif`;
-const FONT_CANDIDATES = [
+const SYSTEM_FONT_CANDIDATES = [
   "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
   "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
   "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -19,25 +20,48 @@ const FONT_CANDIDATES = [
   "C:\\Windows\\Fonts\\msyh.ttc",
   "C:\\Windows\\Fonts\\simhei.ttf",
 ] as const;
+export const BUNDLED_STATUS_FONT_PATH = path.resolve(__dirname, "../../../resources/fonts/NotoSansSC-status-subset.ttf");
 
 let canvasModule: CanvasModule | undefined;
 let fontInitialized = false;
+let fontCoverage: "full" | "labels" | undefined;
 
 function canvas(): CanvasModule {
   if (!canvasModule) canvasModule = require("canvas") as CanvasModule;
   return canvasModule;
 }
 
-function ensureFont(): void {
-  if (fontInitialized) return;
+function ensureFont(): "full" | "labels" | undefined {
+  if (fontInitialized) return fontCoverage;
   fontInitialized = true;
-  for (const candidate of FONT_CANDIDATES) {
+  for (const candidate of SYSTEM_FONT_CANDIDATES) {
     if (!existsSync(candidate)) continue;
     try {
       canvas().registerFont(candidate, {family: FONT_FAMILY});
-      return;
+      fontCoverage = "full";
+      return fontCoverage;
     } catch {}
   }
+  if (existsSync(BUNDLED_STATUS_FONT_PATH)) {
+    try {
+      canvas().registerFont(BUNDLED_STATUS_FONT_PATH, {family: FONT_FAMILY, weight: "700"});
+      fontCoverage = "labels";
+    } catch {}
+  }
+  return fontCoverage;
+}
+
+export function statusCardLabels(cjk: boolean) {
+  return cjk ? Object.freeze({status: "运行状态", healthy: "运行正常", warning: "需要关注", critical: "资源告警",
+    uptime: "在线", memory: "内存", disk: "磁盘", day: "天"})
+    : Object.freeze({status: "System Status", healthy: "Healthy", warning: "Warning", critical: "Critical",
+      uptime: "Uptime", memory: "RAM", disk: "Disk", day: "d"});
+}
+
+function displayName(value: string, cjk: boolean): string {
+  if (cjk) return value;
+  const ascii = value.replace(/[^\x20-\x7e]/g, "").trim();
+  return ascii || "MiBot";
 }
 
 function roundedRect(ctx: CanvasContext, x: number, y: number, width: number, height: number, radius: number): void {
@@ -81,22 +105,23 @@ function capacityPercent(value: {readonly used: number; readonly total: number} 
   return boundedPercent(value.used / value.total * 100);
 }
 
-function cardDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return "不可用";
+function cardDuration(seconds: number, cjk: boolean): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "--";
   const total = Math.floor(seconds);
   const days = Math.floor(total / 86400);
   const hours = Math.floor(total % 86400 / 3600);
   const minutes = Math.floor(total % 3600 / 60);
   const remaining = total % 60;
   const clock = [hours, minutes, remaining].map(value => String(value).padStart(2, "0")).join(":");
-  return days ? `${days}天 ${clock}` : clock;
+  return days ? `${days}${statusCardLabels(cjk).day} ${clock}` : clock;
 }
 
-function resourceHealth(values: readonly (number | undefined)[]): {readonly label: string; readonly color: string} {
+function resourceHealth(values: readonly (number | undefined)[], cjk: boolean): {readonly label: string; readonly color: string} {
+  const labels = statusCardLabels(cjk);
   const maximum = Math.max(0, ...values.filter((value): value is number => value !== undefined));
-  if (maximum >= 90) return {label: "资源告警", color: "#fb7185"};
-  if (maximum >= 75) return {label: "需要关注", color: "#fbbf24"};
-  return {label: "运行正常", color: "#34f59a"};
+  if (maximum >= 90) return {label: labels.critical, color: "#fb7185"};
+  if (maximum >= 75) return {label: labels.warning, color: "#fbbf24"};
+  return {label: labels.healthy, color: "#34f59a"};
 }
 
 function gaugeColor(value: number | undefined, normal: string): string {
@@ -166,12 +191,15 @@ function drawGauge(ctx: CanvasContext, x: number, y: number, label: string, valu
   ctx.lineTo(x + 205, y + height - 61);
   ctx.stroke();
   ctx.textAlign = "left";
-  setFont(ctx, label === "Swap" ? 43 : 42, 700);
-  ctx.fillText(label, x + 232, centerY + 2);
+  const visibleLabel = fittedText(ctx, label, 88, label === "Swap" ? 43 : 42, 24);
+  ctx.fillText(visibleLabel, x + 232, centerY + 2);
 }
 
 export function renderStatusCard(snapshot: StatusSnapshot, name: string): Buffer {
-  ensureFont();
+  const coverage = ensureFont();
+  const cjk = coverage !== undefined;
+  const labels = statusCardLabels(cjk);
+  const visibleName = displayName(name, coverage === "full");
   const surface = canvas().createCanvas(STATUS_CARD_WIDTH, STATUS_CARD_HEIGHT);
   const ctx = surface.getContext("2d");
   const background = ctx.createLinearGradient(0, 0, STATUS_CARD_WIDTH, STATUS_CARD_HEIGHT);
@@ -199,7 +227,7 @@ export function renderStatusCard(snapshot: StatusSnapshot, name: string): Buffer
   ctx.fillStyle = "#f1f5f9";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  const title = `${name} · 运行状态`;
+  const title = `${visibleName} ${cjk ? "·" : "-"} ${labels.status}`;
   const visibleTitle = fittedText(ctx, title, 595, 68, 42);
   ctx.fillText(visibleTitle, 180, 150);
 
@@ -214,7 +242,7 @@ export function renderStatusCard(snapshot: StatusSnapshot, name: string): Buffer
   const memory = capacityPercent(snapshot.systemMemory);
   const disk = capacityPercent(snapshot.disk);
   const swap = capacityPercent(snapshot.swap);
-  const health = resourceHealth([cpu, memory, disk, swap]);
+  const health = resourceHealth([cpu, memory, disk, swap], cjk);
   ctx.save();
   ctx.shadowColor = health.color;
   ctx.shadowBlur = 24;
@@ -228,15 +256,16 @@ export function renderStatusCard(snapshot: StatusSnapshot, name: string): Buffer
   ctx.fillText(health.label, 205, 374);
 
   ctx.fillStyle = "#9fb2c5";
-  setFont(ctx, 42, 600);
-  ctx.fillText("在线", 88, 555);
+  const visibleUptime = fittedText(ctx, labels.uptime, cjk ? 100 : 140, 42, 30);
+  ctx.fillText(visibleUptime, 88, 555);
   ctx.fillStyle = "#f1f5f9";
-  const duration = fittedText(ctx, cardDuration(snapshot.processUptime), 500, 68, 48);
-  ctx.fillText(duration, 205, 555);
+  const durationX = cjk ? 205 : 260;
+  const duration = fittedText(ctx, cardDuration(snapshot.processUptime, cjk), cjk ? 500 : 440, 68, 48);
+  ctx.fillText(duration, durationX, 555);
 
   drawGauge(ctx, 810, 115, "CPU", cpu, gaugeColor(cpu, "#34f59a"));
-  drawGauge(ctx, 1174, 115, "内存", memory, gaugeColor(memory, "#34f59a"));
-  drawGauge(ctx, 810, 395, "磁盘", disk, gaugeColor(disk, "#fbbf24"));
+  drawGauge(ctx, 1174, 115, labels.memory, memory, gaugeColor(memory, "#34f59a"));
+  drawGauge(ctx, 810, 395, labels.disk, disk, gaugeColor(disk, "#fbbf24"));
   drawGauge(ctx, 1174, 395, "Swap", swap, gaugeColor(swap, "#22d3ee"));
 
   ctx.strokeStyle = "#215a78";
@@ -245,7 +274,8 @@ export function renderStatusCard(snapshot: StatusSnapshot, name: string): Buffer
   ctx.moveTo(82, 732);
   ctx.lineTo(1518, 732);
   ctx.stroke();
-  const version = `${name} ${snapshot.applicationVersion}${snapshot.revision ? ` (${snapshot.revision})` : ""}  ·  Node ${snapshot.nodeVersion}  ·  Teleproto ${snapshot.teleprotoVersion}`;
+  const separator = cjk ? "·" : "-";
+  const version = `${visibleName} ${snapshot.applicationVersion}${snapshot.revision ? ` (${snapshot.revision})` : ""}  ${separator}  Node ${snapshot.nodeVersion}  ${separator}  Teleproto ${snapshot.teleprotoVersion}`;
   ctx.fillStyle = "#b8c7d7";
   ctx.textAlign = "center";
   const visibleVersion = fittedText(ctx, version, 1370, 34, 24);

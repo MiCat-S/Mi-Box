@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
+import {readFileSync} from "node:fs";
 import test from "node:test";
+import {createCanvas, registerFont} from "canvas";
 import {HTMLParser} from "teleproto/extensions/html.js";
 import {getBotName, setBotName} from "../branding";
 import type {PluginContext, CommandInvocation} from "../sdk";
@@ -7,7 +10,9 @@ import createStatus, {
   formatBytes, formatDuration, parseOsRelease, parseSwap, parseSystemMemory, renderStatus,
   type StatusSnapshot,
 } from "./status";
-import {renderStatusCard, STATUS_CARD_HEIGHT, STATUS_CARD_WIDTH} from "./status-card";
+import {
+  BUNDLED_STATUS_FONT_PATH, renderStatusCard, statusCardLabels, STATUS_CARD_HEIGHT, STATUS_CARD_WIDTH,
+} from "./status-card";
 
 const snapshot: StatusSnapshot = {
   applicationVersion: "0.7.4",
@@ -77,6 +82,20 @@ test("status renders a concise caption and a wide PNG dashboard from a fixed sna
   assert.equal(image.readUInt32BE(16), STATUS_CARD_WIDTH);
   assert.equal(image.readUInt32BE(20), STATUS_CARD_HEIGHT);
   assert.ok(STATUS_CARD_WIDTH > STATUS_CARD_HEIGHT);
+});
+
+test("status card bundles the Chinese glyphs required on fontless servers", () => {
+  const labels = statusCardLabels(true);
+  assert.deepEqual(labels, {status: "运行状态", healthy: "运行正常", warning: "需要关注", critical: "资源告警",
+    uptime: "在线", memory: "内存", disk: "磁盘", day: "天"});
+
+  const font = readFileSync(BUNDLED_STATUS_FONT_PATH);
+  assert.equal(createHash("sha256").update(font).digest("hex"),
+    "30075d1bc28bd040c7dee00503e1b8eb72f5400fb14b3d0888ad974e76b5ae9a");
+  registerFont(BUNDLED_STATUS_FONT_PATH, {family: "TeleBoxStatusSubsetTest", weight: "700"});
+  const context = createCanvas(600, 120).getContext("2d");
+  context.font = '700 48px "TeleBoxStatusSubsetTest"';
+  assert.ok(context.measureText(Object.values(labels).join(" ")).width > 0);
 });
 
 test("status command sends one image with its caption, deletes the command and uses the deployment root", async () => {
