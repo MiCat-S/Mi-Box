@@ -86,5 +86,19 @@ export default function createSudo(ownerId = process.env.TB_OWNER_ID) {
       footer: ["{prefix}sudo、{prefix}sudo help 或 {prefix}help sudo 查看本说明。"],
     }),
     commands: {sudo: sudoCommand},
+    services: {
+      is_authorized: {
+        description: "查询精确 Telegram 用户 ID 是否在 sudo 白名单中",
+        async handle(input, ctx, signal) {
+          signal.throwIfAborted();
+          const senderId = input && typeof input === "object" && "senderId" in input
+            ? (input as {senderId?: unknown}).senderId : undefined;
+          if (typeof senderId !== "string" || !/^[0-9]+$/.test(senderId)) return false;
+          const value = await ctx.storage.json<SudoConfig>("config.json", defaults).read(signal);
+          signal.throwIfAborted();
+          return value.users.includes(senderId);
+        },
+      },
+    },
   });
 }
