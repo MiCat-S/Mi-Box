@@ -1,4 +1,5 @@
 import path from "node:path";
+import {writeFile} from "node:fs/promises";
 import {setTimeout as delay} from "node:timers/promises";
 import {Api} from "teleproto";
 import {getBotName} from "../branding";
@@ -196,10 +197,11 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         diagnostic: {
           stage,
           code: failure,
-          label: ({repository: "仓库访问", unload: "卸载", activate: "加载"} as Record<string, string>)[stage],
+          label: ({repository: "仓库访问", local: "附件下载", build: "插件构建", unload: "卸载", activate: "加载"} as Record<string, string>)[stage],
         },
         nextStep: stage === "repository"
           ? "在服务器运行 node scripts/plugin-repository.cjs search 检查仓库访问"
+          : stage === "build" ? "请确认附件为 V2 单文件插件，使用 telebox/sdk，且不依赖未提供的相对路径文件"
           : "请稍后重试或查看服务器日志",
       }), htmlOptions);
     } finally {
@@ -477,6 +479,52 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     const requested = [...new Set(invocation.args)];
     const id = requested[0]!;
     await exclusive(ctx, invocation, async stage => {
+      if (action === "install" && !requested.length) {
+        stage("local");
+        const reply = await ctx.telegram.getReply(invocation.message);
+        const raw = reply?.raw as Api.Message | undefined;
+        const document = raw?.document;
+        const filename = document?.attributes.find(attribute => attribute instanceof Api.DocumentAttributeFilename);
+        const name = filename instanceof Api.DocumentAttributeFilename ? filename.fileName : "";
+        const localId = name.endsWith(".ts") ? name.slice(0, -3) : "";
+        if (!raw || !document || !isPluginId(localId)) {
+          await ctx.telegram.edit(invocation.message, "请回复一个以插件 ID 命名的 V2 单文件插件（例如 demo.ts），再执行 tpm i。旧版插件须先迁移至 V2。");
+          return;
+        }
+        const limit = 2 * 1024 * 1024;
+        if (BigInt(document.size.toString()) > BigInt(limit)) {
+          await ctx.telegram.edit(invocation.message, "本地插件文件不能超过 2 MiB"); return;
+        }
+        if (host.pluginState(localId) && !releases.snapshot().generations.some(item => item.id === localId)) {
+          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
+        }
+        await ctx.files.withTemp(async (directory, signal) => {
+          const bytes = await ctx.telegram.withClient(async (client, clientSignal) => {
+            const chunks: Buffer[] = [];
+            let size = 0;
+            for await (const chunk of client.iterDownload(raw, {requestSize: 65536})) {
+              signal.throwIfAborted(); clientSignal.throwIfAborted();
+              size += chunk.length;
+              if (size > limit) throw Object.assign(new Error("Local plugin exceeds limit"), {code: "LIMIT"});
+              chunks.push(Buffer.from(chunk));
+            }
+            return Buffer.concat(chunks);
+          });
+          signal.throwIfAborted();
+          await writeFile(path.join(directory, name), bytes, {flag: "wx", mode: 0o600, signal});
+          stage("build");
+          const result = await ctx.processes.run(process.execPath,
+            [path.join(root, "scripts/build-v2-plugin.cjs"), localId, directory, name],
+            {timeoutMs: 30000, maxOutputBytes: 65536});
+          const candidate = JSON.parse(result.stdout.toString("utf8"));
+          if (candidate.manifest?.id !== localId || !revisionPattern.test(candidate.manifest?.revision ?? "")) throw new Error("Invalid local artifact");
+          signal.throwIfAborted();
+          stage("activate");
+          await releases.activate(localId, candidate.manifest.revision);
+        });
+        await ctx.telegram.edit(invocation.message, `本地插件 ${localId} 已安装并加载。仅支持 V2 单文件插件；同名仓库插件的手动或自动更新可能替换此版本。`);
+        return;
+      }
       if (!requested.length || requested.some(value => !isPluginId(value)) || requested.includes("all") && requested.length > 1) {
         await ctx.telegram.edit(invocation.message, "请提供有效的插件名，多个名字用空格或换行分隔；all 必须单独使用");
         return;
@@ -694,6 +742,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       install: {
         group: "⬇️ 安装插件", aliases: ["i"], args: "插件名 [插件名 ...]",
         alternates: [{args: "all", description: "安装仓库中全部可用扩展，跳过已加载插件和默认模块。"}],
+        notes: ["回复 V2 单文件 .ts 插件后执行 <code>{prefix}tpm i</code> 安装（最大 2 MiB，文件名须与插件 ID 一致）；仅安装可信代码。旧版接口需先迁移。"],
         description: "安装并加载一个或多个指定扩展。对已安装的插件再次执行会更新它。",
         examples: [{args: "i nezha", description: "安装后用 <code>{prefix}help nezha</code> 查看配置和使用方法。"}, {args: "install aban acron aff", description: "一次安装多个插件，失败项单独列出。"}],
         handle: (invocation, ctx) => mutate(invocation, ctx, "install"),

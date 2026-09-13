@@ -28,7 +28,7 @@ function fixture() {
     if (existing) existing.state = "active"; else generations.push({id, state: "active"});
   }, async remove(id: string) {operations.push(`remove:${id}`); const index = generations.findIndex(g => g.id === id); if (index >= 0) generations.splice(index, 1);}};
   const ctx = {signal: new AbortController().signal, log: {error: (_event: string, fields: unknown) => failures.push(fields)},
-    telegram: {async edit(_m: unknown, text: string) {edits.push(text);},
+    telegram: {async getReply() {return undefined;}, async edit(_m: unknown, text: string) {edits.push(text);},
     async reply(_m: unknown, text: string) {edits.push(text);}},
     processes: {async run(_command: string, args: string[]) {
       operations.push(args[1]);
@@ -53,6 +53,51 @@ function channelMessage(options: Partial<ConstructorParameters<typeof Api.Messag
     out: true, message: ".tpm install dig", ...options,
   }), {selfId: "1"});
 }
+
+test("TPM local attachment builds before activation and cleans its temporary source", async () => {
+  const f = fixture();
+  let directory = "";
+  const context = f.ctx as any;
+  context.telegram.getReply = async () => ({raw: {document: {
+    size: returnBigInt(32), attributes: [new Api.DocumentAttributeFilename({fileName: "demo.ts"})],
+  }}});
+  context.telegram.withClient = async (use: any) => use({async *iterDownload() {
+    yield Buffer.from("export default () => ({id: 'demo'});");
+  }}, context.signal);
+  context.files = {withTemp: async (use: any) => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), "tpm-local-test-"));
+    try {return await use(directory, context.signal);}
+    finally {await fs.rm(directory, {recursive: true, force: true});}
+  }};
+  context.processes.run = async (_command: string, args: string[]) => {
+    assert.equal(path.basename(args[0]), "build-v2-plugin.cjs");
+    assert.deepEqual(args.slice(1), ["demo", directory, "demo.ts"]);
+    assert.match(await fs.readFile(path.join(directory, "demo.ts"), "utf8"), /export default/);
+    return {stdout: Buffer.from(JSON.stringify({manifest: {id: "demo", revision: "b".repeat(64)}}))};
+  };
+  await f.run(["i"]);
+  assert.deepEqual(f.operations, ["activate:demo"]);
+  assert.match(f.edits.at(-1)!, /本地插件 demo 已安装/);
+  await assert.rejects(fs.stat(directory), {code: "ENOENT"});
+  f.releases.activate = async () => {throw new ArtifactError("FORMAT");};
+  await f.run(["install"]);
+  assert.match(f.edits.at(-1)!, /插件操作失败/);
+  await assert.rejects(fs.stat(directory), {code: "ENOENT"});
+});
+
+test("TPM local attachment rejects missing, invalid, oversized and builtin files before download", async () => {
+  for (const input of [undefined, {name: "../demo.ts", size: 1}, {name: "demo.js", size: 1},
+    {name: "demo.ts", size: 2097153}, {name: "help.ts", size: 1}]) {
+    const f = fixture();
+    (f.ctx.telegram as any).getReply = async () => input ? {raw: {document: {
+      size: returnBigInt(input.size), attributes: [new Api.DocumentAttributeFilename({fileName: input.name})],
+    }}} : undefined;
+    await f.run(["i"]);
+    assert.deepEqual(f.operations, []);
+    assert.equal(f.failures.length, 0);
+    assert.ok(f.edits.length);
+  }
+});
 
 test("TPM help entries share detailed bounded guidance without running plugin operations", async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "mibot-tpm-help-")));
@@ -577,7 +622,7 @@ test("TPM updates and removes selected plugins, deduplicating canonical names", 
 
 test("TPM rejects mixed all and invalid names before any operation", async () => {
   const f = fixture();
-  for (const names of [[], ['all', 'dig'], ['dig', '../other'], ['dig', 'a,b']]) {
+  for (const names of [['all', 'dig'], ['dig', '../other'], ['dig', 'a,b']]) {
     await f.run(['install', ...names]);
     assert.match(f.edits.at(-1)!, /有效的插件名/);
   }
