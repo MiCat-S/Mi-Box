@@ -32,6 +32,7 @@ import createAutofix from "./builtins/autofix";
 import {TeleprotoPort, messageEnvelope, subscribeMessages} from "./telegram";
 import {AccountError, assertLegacyStopped, lockAccount, readAccount, readEnvironment} from "./account";
 import {installProtocolCompatibility, type ProtocolCompatibility, type ProtocolLogDecision} from "./protocol-compat";
+import type {ApplicationInfo} from "./sdk";
 
 export interface RuntimeOptions {
   root?: string;
@@ -83,9 +84,19 @@ function requireComplete(name: string, report: DrainReport): void {
   if (!report.completed) throw new Error(`${name} did not stop cleanly`);
 }
 
+export async function readApplicationInfo(root: string): Promise<ApplicationInfo> {
+  try {
+    const {mtimeMs} = await fs.stat(path.join(root, "LICENSE"));
+    return Number.isFinite(mtimeMs) ? {licenseModifiedAt: mtimeMs} : {};
+  } catch {
+    return {};
+  }
+}
+
 export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult> {
   if (process.platform !== "linux") throw new AccountError("PLATFORM");
   const root = await fs.realpath(options.root ?? process.cwd());
+  const application = await readApplicationInfo(root);
   await assertLegacyStopped(root);
   const configuration = await readAccount(root);
   const environment = await readEnvironment(root, process.env);
@@ -128,7 +139,7 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     const selfId = me.id.toString();
     await logger.initialize();
     client.setLogLevel(logger.getProtocolLevel() as NativeLogLevel);
-    host = new PluginHost({storageRoot: path.join(root, "assets"), tempRoot: path.join(root, "temp"), selfId,
+    host = new PluginHost({storageRoot: path.join(root, "assets"), tempRoot: path.join(root, "temp"), selfId, application,
       envelope: message => {
         if (!(message instanceof Api.Message)) throw new TypeError("Command dispatch requires a Telegram message");
         return messageEnvelope(message, {selfId});

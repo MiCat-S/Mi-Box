@@ -35,6 +35,7 @@ export const SDK_FEATURES = Object.freeze({
   httpAddressPolicy: 1,
   safeRegexp: 1,
   legacySqlite: 1,
+  applicationInfo: 1,
 } as const);
 export type SdkFeature = keyof typeof SDK_FEATURES;
 
@@ -114,9 +115,15 @@ export interface CommandDispatchResult {
   readonly reason?: "not-self" | "no-command" | "unknown-command" | "edited" | "filtered" | "recursion-limit";
 }
 
+export interface ApplicationInfo {
+  /** Root LICENSE modification time in Unix milliseconds, sampled once by the runtime. */
+  readonly licenseModifiedAt?: number;
+}
+
 export interface PluginContext {
   readonly signal: AbortSignal;
   readonly tasks: ResourceScope;
+  readonly application: Readonly<ApplicationInfo>;
   readonly telegram: {
     edit(message: MessageEnvelope, text: string, options?: MessageOptions): Promise<void>;
     reply(message: MessageEnvelope, text: string, options?: MessageOptions): Promise<void>;

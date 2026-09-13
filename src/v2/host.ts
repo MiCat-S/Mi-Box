@@ -12,7 +12,7 @@ import {DEFAULT_PROCESS_LIMITS, ProcessAbortedError, ProcessClosedError, resolve
 import {SettingsRegistry} from "./settings";
 import {ScopedFiles} from "./files";
 import {ScopedSafeRegExp} from "./safe-regexp";
-import { definePlugin, type CommandDefinition, type CommandDispatchResult, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type MessageFilter, type TelegramPort } from "./sdk";
+import { definePlugin, type ApplicationInfo, type CommandDefinition, type CommandDispatchResult, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type MessageFilter, type TelegramPort } from "./sdk";
 import {renderRichText} from "./ui/document";
 import {renderCommandHelp, resolveHelpPath, type CommandHelpSource, type SubcommandDefinition, type SubcommandHelpSource} from "./commands";
 
@@ -81,6 +81,8 @@ function describeCommand(name: string, command: CommandDefinition): CommandHelpS
 export interface HostOptions {
   storageRoot: string;
   tempRoot?: string;
+  /** Application-owned metadata snapshot; plugins cannot select filesystem paths. */
+  application?: Readonly<ApplicationInfo>;
   telegram: TelegramPort;
   logger: PluginLogger;
   prefixes?: readonly string[];
@@ -109,10 +111,13 @@ export class PluginHost {
   private readonly processCaps: Required<ProcessLimits>;
   private readonly plugins = new Map<string, LoadedPlugin>();
   private readonly commands = new Map<string, CommandTarget>();
+  private readonly application: Readonly<ApplicationInfo>;
   private prefixes: readonly string[] = [];
   private aliases: ReadonlyMap<string, string>;
 
   constructor(private readonly options: HostOptions) {
+    this.application = Object.freeze(options.application?.licenseModifiedAt === undefined
+      ? {} : {licenseModifiedAt: options.application.licenseModifiedAt});
     this.processCaps = resolveProcessLimits(options.processes);
     this.replacePrefixes(options.prefixes === undefined ? ["."] : options.prefixes);
     this.aliases = new Map();
@@ -327,7 +332,8 @@ export class PluginHost {
       return typeof value === "function" ? value.bind(target) : value;
     }}) as ResourceScope;
     return Object.freeze({
-      get signal(): AbortSignal { return scopedSignal(scope.signal); }, tasks, log: this.options.logger,
+      get signal(): AbortSignal { return scopedSignal(scope.signal); }, tasks, application: this.application,
+      log: this.options.logger,
       http: new ScopedHttp(tasks, this.options.http),
       files: new ScopedFiles(tasks, this.options.storageRoot, this.options.tempRoot ?? path.join(this.options.storageRoot, '.temp'), id),
       processes: {run: runProcess},

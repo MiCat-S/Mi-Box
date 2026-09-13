@@ -160,9 +160,9 @@ test("generated help derives usage, aliases, examples and long sections from one
 
 test("SDK feature assertions expose a stable capability list", () => {
   assert.deepEqual(Object.keys(SDK_FEATURES), [
-    "commandMetadata", "messageFilter", "commandHelp", "commandDispatch", "httpAddressPolicy", "safeRegexp", "legacySqlite",
+    "commandMetadata", "messageFilter", "commandHelp", "commandDispatch", "httpAddressPolicy", "safeRegexp", "legacySqlite", "applicationInfo",
   ]);
-  assert.doesNotThrow(() => requireSdkFeatures("commandMetadata", "commandHelp", "commandDispatch", "httpAddressPolicy", "safeRegexp", "legacySqlite"));
+  assert.doesNotThrow(() => requireSdkFeatures("commandMetadata", "commandHelp", "commandDispatch", "httpAddressPolicy", "safeRegexp", "legacySqlite", "applicationInfo"));
   assert.throws(() => requireSdkFeatures("nope" as never), /Unsupported SDK feature: nope/);
   assert.deepEqual(SAFE_REGEXP_LIMITS, {maxPatternLength: 512, maxInputLength: 4096, startupTimeoutMs: 1000,
     executionTimeoutMs: 50, concurrency: 4, queueCapacity: 64});
