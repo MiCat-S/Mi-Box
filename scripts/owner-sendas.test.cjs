@@ -16,9 +16,9 @@ const factories = {
   sure: () => require(path.join(artifactDir, 'index.cjs')).default(),
 };
 const args = {exec: ['/bin/echo', 'ok'], bf: [], sudo: ['add', '456'], privacy: ['ip', 'hide'], help: ['name', 'Channel Bot'], sure: ['user', 'add', '456']};
-function envelope() {
+function envelope(text) {
   return messageEnvelope(new Api.Message({id: 7, peerId: new Api.PeerChannel({channelId: 456n}),
-    fromId: new Api.PeerChannel({channelId: 789n}), out: true, date: 1, message: '.test'}));
+    fromId: new Api.PeerChannel({channelId: 789n}), out: true, date: 1, message: text}));
 }
 for (const id of Object.keys(factories)) test(`${id} authorizes owner group send-as and rejects unproven channel identities`, async t => {
   const previous = process.env.TB_OWNER_ID;
@@ -34,6 +34,7 @@ for (const id of Object.keys(factories)) test(`${id} authorizes owner group send
   const edits = [];
   const ctx = {
     signal: new AbortController().signal,
+    tasks: {add: (_label, cleanup) => cleanup},
     storage: {json: () => ({read: async () => state, update: async fn => {effects++; state = fn(state); return state;}})},
     processes: {run: async () => {effects++; return {stdout: Buffer.from('ok'), stderr: Buffer.alloc(0)};}},
     files: {withTemp: async fn => fn('/tmp', new AbortController().signal)},
@@ -41,7 +42,7 @@ for (const id of Object.keys(factories)) test(`${id} authorizes owner group send
   };
   const plugin = factories[id]();
   const run = message => plugin.commands[id].handle({message, args: args[id], command: id, prefix: '.'}, ctx);
-  const skin = envelope();
+  const skin = envelope(`.${id} ${args[id].join(' ')}`);
   for (const patch of [{outgoing: false}, {forwarded: true}, {edited: true}, {raw: {...skin.raw, post: true}},
     {raw: undefined}, {senderId: '999'}, {chatId: '123'}]) {
     const before = effects;
