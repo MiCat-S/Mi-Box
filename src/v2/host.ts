@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { KeyedExecutor, ExecutorClosedError } from "./executor";
 import { ResourceScope, type DrainReport } from "./lifecycle";
 import { StorageRoot, type JsonStore } from "./storage";
@@ -11,7 +12,7 @@ import {DEFAULT_PROCESS_LIMITS, ProcessAbortedError, ProcessClosedError, resolve
 import {SettingsRegistry} from "./settings";
 import {ScopedFiles} from "./files";
 import {ScopedSafeRegExp} from "./safe-regexp";
-import { definePlugin, type CommandDefinition, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type MessageFilter, type TelegramPort } from "./sdk";
+import { definePlugin, type CommandDefinition, type CommandDispatchResult, type PluginDefinition, type PluginContext, type PluginLogger, type MessageEnvelope, type MessageFilter, type TelegramPort } from "./sdk";
 import {renderRichText} from "./ui/document";
 import {renderCommandHelp, resolveHelpPath, type CommandHelpSource, type SubcommandDefinition, type SubcommandHelpSource} from "./commands";
 
@@ -33,6 +34,7 @@ interface SqliteEntry {store: SqliteStore; readonly: boolean; mustExist: boolean
 interface PluginStorage { json: StorageRoot; sqlite: Map<string, SqliteEntry>; legacySqlite: Map<string, SqliteEntry>; }
 interface LoadedPlugin { definition: PluginDefinition; scope: ResourceScope; storage: PluginStorage; context: PluginContext; ready: boolean; owner?: object; }
 interface CommandTarget { plugin: LoadedPlugin; name: string; }
+interface ParsedCommand { prefix: string; command: string; args: string[]; text: string }
 
 /** Deep-frozen, handler-free subcommand metadata including nested levels. */
 function describeSubcommand(sub: SubcommandDefinition): SubcommandHelpSource {
@@ -87,13 +89,21 @@ export interface HostOptions {
   queueCapacity?: number;
   http?: ScopedHttpOptions;
   processes?: ProcessLimits;
+  /** Authenticated account id; required for plugin-initiated command dispatch. */
+  selfId?: string;
+  /** Normalizes a transport message for dispatch and throws when it is not a real protocol message. */
+  envelope?: (message: unknown) => MessageEnvelope;
 }
+
+/** Bounded chain length for plugin-initiated command dispatch, independent of executor concurrency. */
+const MAX_COMMAND_DISPATCH_DEPTH = 4;
 
 export class PluginHost {
   private readonly safeRegExp = new ScopedSafeRegExp();
   private readonly root = new ResourceScope();
   private readonly executor: KeyedExecutor;
   private readonly scheduler: PluginScheduler;
+  private readonly dispatchContext = new AsyncLocalStorage<{depth: number; signal: AbortSignal}>();
   private readonly settings = new SettingsRegistry();
   private processes?: ScopedProcesses;
   private readonly processCaps: Required<ProcessLimits>;
@@ -220,6 +230,28 @@ export class PluginHost {
     const id = definition.id;
     const allowedLegacySqlite = new Set(definition.legacyStorage?.sqlite ?? []);
     const combined = (signal: AbortSignal, caller?: AbortSignal) => caller ? AbortSignal.any([signal, caller]) : signal;
+    // A plugin-initiated dispatch runs the target handler inside the caller's
+    // async context. Managed operations must honour that combined signal, while
+    // the plugin scope keeps owning its own long-lived jobs.
+    let cachedExtra: AbortSignal | undefined;
+    let cachedScoped: AbortSignal | undefined;
+    const scopedSignal = (signal: AbortSignal): AbortSignal => {
+      const extra = this.dispatchContext.getStore()?.signal;
+      if (!extra) return signal;
+      if (extra !== cachedExtra) {
+        cachedExtra = extra;
+        cachedScoped = AbortSignal.any([signal, extra]);
+      }
+      return cachedScoped!;
+    };
+    const run = <T>(label: string, operation: (signal: AbortSignal) => T | Promise<T>): Promise<T> =>
+      scope.run(label, signal => {
+        // The plugin scope is still active during a cancelled dispatch, so the
+        // combined signal must gate every managed operation before it starts.
+        const active = scopedSignal(signal);
+        active.throwIfAborted();
+        return operation(active);
+      });
     const requested = definition.resources?.processes;
     const pluginProcessLimits = requested && resolveProcessLimits({
       concurrency: requested.concurrency ?? Math.min(DEFAULT_PROCESS_LIMITS.concurrency, this.processCaps.concurrency),
@@ -248,7 +280,7 @@ export class PluginHost {
         timeoutMs: options.timeoutMs ?? pluginProcessLimits?.timeoutMs,
         maxOutputBytes: options.maxOutputBytes ?? pluginProcessLimits?.maxOutputBytes,
       };
-      return scope.run("process:run", signal => {
+      return run("process:run", signal => {
         this.processes ??= new ScopedProcesses(this.root, this.processCaps);
         const callerSignal = combined(signal, options.signal);
         const execute = () => this.processes!.run(command, args, {...invocation, signal: callerSignal});
@@ -280,24 +312,31 @@ export class PluginHost {
       const sqlite = entry.store;
       return Object.freeze({
         read: <T>(callback: (db: SqliteConnection) => T, caller?: AbortSignal) =>
-          scope.run(`${label}:read`, signal => sqlite.read(callback, combined(signal, caller))),
+          run(`${label}:read`, signal => sqlite.read(callback, combined(signal, caller))),
         transaction: <T>(callback: (db: SqliteConnection) => T, caller?: AbortSignal) =>
-          scope.run(`${label}:transaction`, signal => sqlite.transaction(callback, combined(signal, caller))),
+          run(`${label}:transaction`, signal => sqlite.transaction(callback, combined(signal, caller))),
         preflight: (required?: Readonly<Record<string, readonly string[]>>, caller?: AbortSignal) =>
-          scope.run(`${label}:preflight`, signal => sqlite.preflight(required, combined(signal, caller))),
+          run(`${label}:preflight`, signal => sqlite.preflight(required, combined(signal, caller))),
       });
     };
+    const tasks = new Proxy(scope, {get(target, key) {
+      if (key === "run") return <T>(label: string, operation: (signal: AbortSignal) => T | Promise<T>) => run(label, operation);
+      // Synchronous signal reads (e.g. files.dataPath) must see the combined signal too.
+      if (key === "signal") return scopedSignal(target.signal);
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }}) as ResourceScope;
     return Object.freeze({
-      signal: scope.signal, tasks: scope, log: this.options.logger,
-      http: new ScopedHttp(scope, this.options.http),
-      files: new ScopedFiles(scope, this.options.storageRoot, this.options.tempRoot ?? path.join(this.options.storageRoot, '.temp'), id),
+      get signal(): AbortSignal { return scopedSignal(scope.signal); }, tasks, log: this.options.logger,
+      http: new ScopedHttp(tasks, this.options.http),
+      files: new ScopedFiles(tasks, this.options.storageRoot, this.options.tempRoot ?? path.join(this.options.storageRoot, '.temp'), id),
       processes: {run: runProcess},
       storage: {json: <T extends Record<string, unknown>>(file: string, defaults: T): Pick<JsonStore<T>, "read" | "update"> => {
         const store = storage.json.json(id, file, defaults);
         return Object.freeze({
-          read: (caller?: AbortSignal) => scope.run("storage:read", signal => store.read(combined(signal, caller))),
+          read: (caller?: AbortSignal) => run("storage:read", signal => store.read(combined(signal, caller))),
           update: (mutator: (current: T) => T | Promise<T>, caller?: AbortSignal) =>
-            scope.run("storage:update", signal => store.update(mutator, combined(signal, caller))),
+            run("storage:update", signal => store.update(mutator, combined(signal, caller))),
         });
       }, sqlite: (file: string, options: SqliteOptions = {}) =>
         sqliteCapability(storage.sqlite, file, path.join(this.options.storageRoot, id, file), options, "sqlite"),
@@ -307,24 +346,34 @@ export class PluginHost {
           {...options, mustExist: true}, "legacy-sqlite");
       }},
       jobs: {register: (name: string, spec: ScheduledJob, handler: (signal: AbortSignal) => void | Promise<void>) =>
-        this.scheduler.register(id, name, spec, scope, signal => this.executor.submit(`job:${id}:${name}`, () => {
-          const plugin = this.plugins.get(id);
-          if (plugin?.scope === scope && plugin.ready) return handler(signal);
-        }, signal))},
+        this.scheduler.register(id, name, spec, scope, signal => this.executor.submit(`job:${id}:${name}`,
+          // A cron timer may be created during a plugin-initiated dispatch; its future
+          // ticks must not inherit that dispatch's signal or recursion depth.
+          () => this.dispatchContext.exit(() => {
+            const plugin = this.plugins.get(id);
+            if (plugin?.scope === scope && plugin.ready) return handler(signal);
+            return undefined;
+          }), signal),
+          // The creating dispatch may only admit or reject this registration; it never
+          // owns the accepted timer, which stays bound to the target plugin scope.
+          this.dispatchContext.getStore()?.signal)},
       plugins: Object.freeze({list: () => {
         scope.signal.throwIfAborted();
         return Object.freeze(this.listPlugins().map(({id, description}) => Object.freeze({id, description})));
       }}),
-      commands: {parse: (text: string) => {
-        const parsed = this.parse(text);
-        return parsed && Object.freeze({...parsed, args: Object.freeze([...parsed.args])});
-      }},
+      commands: {
+        parse: (text: string) => {
+          const parsed = this.parse(text);
+          return parsed && Object.freeze({...parsed, args: Object.freeze([...parsed.args])});
+        },
+        dispatch: (message: unknown) => run("command:dispatch", () => this.dispatchCommandMessage(message, scope)),
+      },
       services: {
         available: (pluginId: string, service: string) => {
           const provider = this.plugins.get(pluginId);
           return !!provider?.ready && Object.hasOwn(provider.definition.services ?? {}, service);
         },
-        call: <T>(pluginId: string, service: string, input: unknown, caller?: AbortSignal) => scope.run("service:call", signal => {
+        call: <T>(pluginId: string, service: string, input: unknown, caller?: AbortSignal) => run("service:call", signal => {
           const provider = this.plugins.get(pluginId);
           if (!provider?.ready || !Object.hasOwn(provider.definition.services ?? {}, service)) throw new Error("Plugin service unavailable");
           const handler = provider.definition.services![service];
@@ -336,14 +385,14 @@ export class PluginHost {
         }),
       },
       regexp: Object.freeze({test: (pattern: string, input: string, options = {}, caller?: AbortSignal) =>
-        scope.run("regexp:test", signal => this.safeRegExp.test(pattern, input, options, combined(signal, caller)))}),
+        run("regexp:test", signal => this.safeRegExp.test(pattern, input, options, combined(signal, caller)))}),
       telegram: {
-        edit: (message: MessageEnvelope, text: string, options = {}) => scope.run("telegram:edit", signal => this.options.telegram.edit(message, text, options, signal)),
-        reply: (message: MessageEnvelope, text: string, options = {}) => scope.run("telegram:reply", signal => this.options.telegram.reply(message, text, options, signal)),
-        invoke: (request: unknown) => scope.run("telegram:invoke", signal => this.options.telegram.invoke(request, signal)),
-        getReply: (message: MessageEnvelope) => scope.run("telegram:reply-read", signal => this.options.telegram.getReply(message, signal)),
+        edit: (message: MessageEnvelope, text: string, options = {}) => run("telegram:edit", signal => this.options.telegram.edit(message, text, options, signal)),
+        reply: (message: MessageEnvelope, text: string, options = {}) => run("telegram:reply", signal => this.options.telegram.reply(message, text, options, signal)),
+        invoke: (request: unknown) => run("telegram:invoke", signal => this.options.telegram.invoke(request, signal)),
+        getReply: (message: MessageEnvelope) => run("telegram:reply-read", signal => this.options.telegram.getReply(message, signal)),
         withClient: <T>(operation: (client: TelegramClient, signal: AbortSignal) => Promise<T>) =>
-          scope.run("telegram:native", signal => this.options.telegram.withClient(operation, signal)),
+          run("telegram:native", signal => this.options.telegram.withClient(operation, signal)),
       },
     });
   }
@@ -405,7 +454,7 @@ export class PluginHost {
     return report;
   }
 
-  private parse(text: string): {prefix: string; command: string; args: string[]; text: string} | undefined {
+  private parse(text: string): ParsedCommand | undefined {
     const prefix = this.prefixes.reduce<string | undefined>((matched, candidate) =>
       text.startsWith(candidate) && (matched === undefined || candidate.length > matched.length) ? candidate : matched,
     undefined);
@@ -439,44 +488,104 @@ export class PluginHost {
     if (!admitsMessage(message, command)) return Promise.resolve(false);
     const snapshot = Object.freeze({...message, text: parsed.text});
     const plugin = target.plugin;
-    return plugin.scope.run(`command:${target.name}`, () => this.executor.submit(`command:${message.chatId}:${message.id}`, async () => {
-      plugin.scope.signal.throwIfAborted();
-      let helpSource: string | undefined;
-      if (plugin.definition.apiVersion >= 2) {
-        // Structured declarations resolve declared subcommand paths on top of the
-        // root help policy; free-text inputs are never captured.
-        const requestedPath = resolveHelpPath(command, parsed.args, command.helpArgs ?? []);
-        if (requestedPath) {
-          helpSource = requestedPath.length === 0 && plugin.definition.renderHelp
-            ? plugin.definition.renderHelp(parsed.prefix)
-            : renderCommandHelp(target.name, command, {prefix: parsed.prefix, path: requestedPath});
-        } else if (!parsed.args.length && command.helpOnEmpty) {
-          helpSource = plugin.definition.renderHelp?.(parsed.prefix)
-            ?? renderCommandHelp(target.name, command, {prefix: parsed.prefix});
-        }
-      } else if (plugin.definition.renderHelp) {
-        // Legacy declaration keeps its historical behavior: only a root renderHelp
-        // with an exact one-token help request or an empty helpOnEmpty invocation
-        // is intercepted; everything else stays with the business handler.
-        const explicitHelp = parsed.args.length === 1 &&
-          ["--help", ...(command.helpArgs ?? [])].includes(parsed.args[0].toLowerCase());
-        if (explicitHelp || (!parsed.args.length && command.helpOnEmpty)) {
-          helpSource = plugin.definition.renderHelp(parsed.prefix);
-        }
+    return plugin.scope.run(`command:${target.name}`, () =>
+      this.executor.submit(`command:${message.chatId}:${message.id}`, () => this.executeCommand(target, parsed, snapshot), plugin.scope.signal));
+  }
+
+  /** Shared help resolution for network ingress and plugin-initiated dispatch. */
+  private helpSource(target: CommandTarget, parsed: ParsedCommand): string | undefined {
+    const plugin = target.plugin;
+    const command = plugin.definition.commands[target.name];
+    if (plugin.definition.apiVersion >= 2) {
+      // Structured declarations resolve declared subcommand paths on top of the
+      // root help policy; free-text inputs are never captured.
+      const requestedPath = resolveHelpPath(command, parsed.args, command.helpArgs ?? []);
+      if (requestedPath) {
+        return requestedPath.length === 0 && plugin.definition.renderHelp
+          ? plugin.definition.renderHelp(parsed.prefix)
+          : renderCommandHelp(target.name, command, {prefix: parsed.prefix, path: requestedPath});
       }
-      if (helpSource !== undefined) {
-        const pages = await renderRichText(helpSource);
-        for (const [index, page] of pages.entries()) {
-          plugin.scope.signal.throwIfAborted();
-          const options = {parseMode: "html", linkPreview: false} as const;
-          if (index === 0) await plugin.context.telegram.edit(snapshot, page, options);
-          else await plugin.context.telegram.reply(snapshot, page, options);
-        }
-        return true;
+      if (!parsed.args.length && command.helpOnEmpty) {
+        return plugin.definition.renderHelp?.(parsed.prefix)
+          ?? renderCommandHelp(target.name, command, {prefix: parsed.prefix});
       }
-      await command.handle({message: snapshot, command: target.name, prefix: parsed.prefix, args: Object.freeze(parsed.args)}, plugin.context);
+      return undefined;
+    }
+    if (plugin.definition.renderHelp) {
+      // Legacy declaration keeps its historical behavior: only a root renderHelp
+      // with an exact one-token help request or an empty helpOnEmpty invocation
+      // is intercepted; everything else stays with the business handler.
+      const explicitHelp = parsed.args.length === 1 &&
+        ["--help", ...(command.helpArgs ?? [])].includes(parsed.args[0].toLowerCase());
+      if (explicitHelp || (!parsed.args.length && command.helpOnEmpty)) return plugin.definition.renderHelp(parsed.prefix);
+    }
+    return undefined;
+  }
+
+  /** Shared command body: help interception then the business handler. */
+  private async executeCommand(target: CommandTarget, parsed: ParsedCommand, snapshot: MessageEnvelope): Promise<boolean> {
+    const plugin = target.plugin;
+    const signal = this.dispatchContext.getStore()?.signal ?? plugin.scope.signal;
+    signal.throwIfAborted();
+    const helpSource = this.helpSource(target, parsed);
+    if (helpSource !== undefined) {
+      const pages = await renderRichText(helpSource);
+      for (const [index, page] of pages.entries()) {
+        signal.throwIfAborted();
+        const options = {parseMode: "html", linkPreview: false} as const;
+        if (index === 0) await plugin.context.telegram.edit(snapshot, page, options);
+        else await plugin.context.telegram.reply(snapshot, page, options);
+      }
       return true;
-    }, plugin.scope.signal));
+    }
+    await plugin.definition.commands[target.name].handle({message: snapshot, command: target.name, prefix: parsed.prefix, args: Object.freeze([...parsed.args])}, plugin.context);
+    return true;
+  }
+
+  /**
+   * Plugin-initiated dispatch of a message the authenticated account just sent.
+   * Runs inline when already inside an executor lane and otherwise enters the
+   * global executor, so it can never bypass host concurrency. Cancellation
+   * rejects with the combined signal's reason (AbortError) rather than a normal
+   * ignored result.
+   */
+  private async dispatchCommandMessage(message: unknown, callerScope: ResourceScope): Promise<CommandDispatchResult> {
+    if (this.root.signal.aborted) throw new ExecutorClosedError();
+    const selfId = this.options.selfId;
+    const normalize = this.options.envelope;
+    if (selfId === undefined || normalize === undefined) throw new Error("Command dispatch is unavailable");
+    const envelope = normalize(message);
+    if (envelope.senderId !== selfId || (!envelope.outgoing && !envelope.saved)) {
+      return {status: "ignored", reason: "not-self"};
+    }
+    const parsed = this.parse(envelope.text);
+    if (!parsed) return {status: "ignored", reason: "no-command"};
+    const target = this.commands.get(parsed.command);
+    if (!target?.plugin.ready) return {status: "ignored", reason: "unknown-command"};
+    const command = target.plugin.definition.commands[target.name];
+    if (envelope.edited && (command.ignoreEdited ?? true)) return {status: "ignored", reason: "edited"};
+    if (!admitsMessage(envelope, command)) return {status: "ignored", reason: "filtered"};
+    const outer = this.dispatchContext.getStore();
+    if ((outer?.depth ?? 0) >= MAX_COMMAND_DISPATCH_DEPTH) return {status: "ignored", reason: "recursion-limit"};
+    const combined = AbortSignal.any([callerScope.signal, target.plugin.scope.signal, this.root.signal,
+      ...(outer ? [outer.signal] : [])]);
+    combined.throwIfAborted();
+    const snapshot = Object.freeze({...envelope, text: parsed.text});
+    const execute = (laneSignal?: AbortSignal) => {
+      const base = laneSignal ? AbortSignal.any([combined, laneSignal]) : combined;
+      return target.plugin.scope.run(`command:dispatched:${target.name}`, targetSignal => {
+        const signal = AbortSignal.any([base, targetSignal]);
+        signal.throwIfAborted();
+        return this.dispatchContext.run({depth: (outer?.depth ?? 0) + 1, signal}, async () => {
+          await this.executeCommand(target, parsed, snapshot);
+          // A handler that resolves after cancellation must not masquerade as success.
+          signal.throwIfAborted();
+          return {status: "dispatched" as const, command: target.name, pluginId: target.plugin.definition.id};
+        });
+      });
+    };
+    if (this.executor.inLane()) return execute();
+    return this.executor.submit(`command:dispatched:${envelope.chatId}:${envelope.id}`, signal => execute(signal), combined);
   }
 
   dispatchListeners(message: MessageEnvelope): Promise<void> {

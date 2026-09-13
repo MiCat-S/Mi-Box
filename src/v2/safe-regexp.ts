@@ -32,7 +32,9 @@ export interface ScopedSafeRegExpOptions {
 
 function flags(value: string | undefined): string {
   const selected = value ?? "";
-  if (!/^[imsu]*$/.test(selected) || new Set(selected).size !== selected.length) {
+  // Node 24 legal flags. Duplicates are rejected here; the mutually exclusive
+  // u/v combination is validated by the worker's RegExp constructor.
+  if (!/^[dgimsuvy]*$/.test(selected) || new Set(selected).size !== selected.length) {
     throw new SafeRegExpError("INVALID_PATTERN");
   }
   return selected;

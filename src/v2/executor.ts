@@ -54,6 +54,9 @@ export class KeyedExecutor {
 
   snapshot() { return {active: this.active, queued: this.queue.length, closed: this.closed}; }
 
+  /** True while the current async context is already running inside a submitted task. */
+  inLane(): boolean { return this.execution.getStore()?.active === true; }
+
   submit<T>(key: string, run: (signal: AbortSignal) => T | Promise<T>, signal?: AbortSignal): Promise<T> {
     if (this.closed) return Promise.reject(new ExecutorClosedError());
     if (signal?.aborted) return Promise.reject(signal.reason);

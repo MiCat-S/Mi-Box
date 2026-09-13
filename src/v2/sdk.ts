@@ -31,6 +31,7 @@ export const SDK_FEATURES = Object.freeze({
   commandMetadata: 1,
   messageFilter: 1,
   commandHelp: 1,
+  commandDispatch: 1,
   httpAddressPolicy: 1,
   safeRegexp: 1,
   legacySqlite: 1,
@@ -104,6 +105,15 @@ export interface PluginLogger {
   error(event: string, fields?: Readonly<Record<string, string | number | boolean>>): void;
 }
 
+/** Outcome of routing a plugin-sent message back through command dispatch. */
+export interface CommandDispatchResult {
+  /** `dispatched` means the message reached the matched command's normal path (which may still no-op in `authorize`). */
+  readonly status: "dispatched" | "ignored";
+  readonly command?: string;
+  readonly pluginId?: string;
+  readonly reason?: "not-self" | "no-command" | "unknown-command" | "edited" | "filtered" | "recursion-limit";
+}
+
 export interface PluginContext {
   readonly signal: AbortSignal;
   readonly tasks: ResourceScope;
@@ -137,6 +147,11 @@ export interface PluginContext {
   /** Read-only view of the host's current prefix and alias routing rules. */
   readonly commands: {
     parse(text: string): CommandRoute | undefined;
+    /**
+     * Routes a real protocol message the authenticated account just sent through
+     * the host's normal command path. Cancellation rejects with AbortError.
+     */
+    dispatch(message: unknown): Promise<CommandDispatchResult>;
   };
   readonly http: Pick<ScopedHttp, "withResponse" | "text" | "json">;
   readonly processes: Pick<ScopedProcesses, "run">;

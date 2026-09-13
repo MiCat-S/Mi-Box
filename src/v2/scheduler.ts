@@ -25,8 +25,12 @@ export class PluginScheduler {
     spec: ScheduledJob,
     scope: ResourceScope,
     handler: (signal: AbortSignal) => void | Promise<void>,
+    admission?: AbortSignal,
   ): Promise<() => Promise<void>> {
     scope.signal.throwIfAborted();
+    // Admission gates only this registration call. It is never attached to the
+    // timer, so a later caller cancellation cannot stop an accepted job.
+    admission?.throwIfAborted();
     const key = JSON.stringify([pluginId, id]);
     if (this.jobs.has(key) || this.registering.has(key)) {
       throw new Error("Scheduled job already registered");
@@ -40,6 +44,7 @@ export class PluginScheduler {
         this.reportFailure("scheduler.load_failed");
         throw new Error("Cron scheduler could not load");
       }
+      admission?.throwIfAborted();
       signal.throwIfAborted();
       let stopped = false;
       let running = false;
@@ -77,6 +82,7 @@ export class PluginScheduler {
         this.reportFailure("scheduler.registration_failed");
         throw new Error("Invalid scheduled job");
       }
+      admission?.throwIfAborted();
       signal.throwIfAborted();
       this.jobs.set(key, job);
       const onAbort = (): void => { void dispose(); };
@@ -88,6 +94,7 @@ export class PluginScheduler {
       });
       signal.addEventListener("abort", onAbort, { once: true });
       try {
+        admission?.throwIfAborted();
         signal.throwIfAborted();
         job.start();
       } catch {

@@ -348,6 +348,27 @@ test("a start failure stops an allocated timer and releases the name reservation
   await f.scheduler.register("plugin", "retry", annual, scope, () => undefined);
 });
 
+test("admission cancellation during registration creates no timer and is not bound to the job", async (t) => {
+  const f = await fixture(t);
+  const scope = f.scope();
+  const admission = new AbortController();
+  const pending = f.scheduler.register("plugin", "admission", annual, scope, () => assert.fail("must not run"), admission.signal);
+  admission.abort(new Error("admission cancelled"));
+  await assert.rejects(pending, (error) => error instanceof Error && error.message === "admission cancelled");
+  assert.deepEqual(f.scheduler.snapshot(), { jobs: 0, running: 0 });
+  assert.equal(scope.snapshot().pendingResources, 0);
+  assert.equal(scope.snapshot().pendingTasks, 0);
+  assert.equal(getEventListeners(admission.signal, "abort").length, 0, "the job must not bind the admission signal");
+
+  const accepted = new AbortController();
+  const dispose = await f.scheduler.register("plugin", "survivor", annual, f.scope(), () => undefined, accepted.signal);
+  accepted.abort(new Error("after publish"));
+  assert.deepEqual(f.scheduler.snapshot(), { jobs: 1, running: 0 });
+  assert.equal(f.jobs()[0].isActive, true);
+  assert.equal(getEventListeners(accepted.signal, "abort").length, 0, "a published timer never binds the admission signal");
+  await dispose();
+});
+
 test("50 register-run-dispose cycles release timers, listeners, callbacks and scope resources", async (t) => {
   const f = await fixture(t);
   const setTimer = t.mock.method(globalThis, "setTimeout");

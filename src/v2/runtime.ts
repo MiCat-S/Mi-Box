@@ -29,7 +29,7 @@ import {StorageRoot} from "./storage";
 import createTpm from "./builtins/tpm";
 import createUpdate from "./builtins/update";
 import createAutofix from "./builtins/autofix";
-import {TeleprotoPort, subscribeMessages} from "./telegram";
+import {TeleprotoPort, messageEnvelope, subscribeMessages} from "./telegram";
 import {AccountError, assertLegacyStopped, lockAccount, readAccount, readEnvironment} from "./account";
 import {installProtocolCompatibility, type ProtocolCompatibility, type ProtocolLogDecision} from "./protocol-compat";
 
@@ -128,7 +128,11 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     const selfId = me.id.toString();
     await logger.initialize();
     client.setLogLevel(logger.getProtocolLevel() as NativeLogLevel);
-    host = new PluginHost({storageRoot: path.join(root, "assets"), tempRoot: path.join(root, "temp"),
+    host = new PluginHost({storageRoot: path.join(root, "assets"), tempRoot: path.join(root, "temp"), selfId,
+      envelope: message => {
+        if (!(message instanceof Api.Message)) throw new TypeError("Command dispatch requires a Telegram message");
+        return messageEnvelope(message, {selfId});
+      },
       telegram: new TeleprotoPort(client, transport, {selfId}), logger, prefixes: prefixesFromEnv(environment),
       processes: {concurrency: 2, queueCapacity: 16, timeoutMs: 180_000, maxOutputBytes: 2 * 1024 * 1024},
     });
