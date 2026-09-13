@@ -38,7 +38,7 @@ for (const id of Object.keys(factories)) test(`${id} authorizes owner group send
     storage: {json: () => ({read: async () => state, update: async fn => {effects++; state = fn(state); return state;}})},
     processes: {run: async () => {effects++; return {stdout: Buffer.from('ok'), stderr: Buffer.alloc(0)};}},
     files: {withTemp: async fn => fn('/tmp', new AbortController().signal)},
-    telegram: {edit: async (_m, text) => edits.push(text), withClient: async fn => fn({getMe: async () => ({id: 123n}), sendFile: async () => {effects++;}})},
+    telegram: {edit: async (_m, text) => edits.push(text), withClient: async fn => fn({getMe: async () => ({id: 123n}), sendFile: async () => {effects++;}}, ctx.signal)},
   };
   const plugin = factories[id]();
   const run = message => plugin.commands[id].handle({message, args: args[id], command: id, prefix: '.'}, ctx);
