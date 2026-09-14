@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.8.10] - 2026-09-14
+
+- 回退 613dd2b：`src/utils/pluginManager.ts` 与 `src/plugin/reload.ts` 属遗留插件系统，V2 的构建、`tsconfig.v2.json` 类型检查与全部测试都不覆盖这两个路径，原改动不改变运行时行为；本次不改变任何用户可见行为。
+- 删除误加入 Core 的 `src/v2/builtins/bs.ts`；`bs` 只在 Mi-Box-Plugins 扩展仓库保留一处实现，跨仓归属检查恢复通过。
+
 ## [0.8.9] - 2026-09-14
 
 - 增加显式 macOS 开发启动模式，保留 Linux 生产限制与内核账号锁；flock 支持绝对 PATH 目录和常用安装位置，缺失时提示安装。

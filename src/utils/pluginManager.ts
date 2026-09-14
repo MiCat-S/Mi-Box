@@ -546,14 +546,8 @@ async function dealCommandPlugin(
   event: NewMessageEvent | EditedMessageEvent
 ): Promise<void> {
   const msg = event.message;
-  // Check if message is from Saved Messages:
-  // 1. Has savedPeerId field (forwarded to/from saved)
-  // 2. Is outgoing (msg.out = true)
-  // Note: msg.out is the reliable indicator for self-sent messages.
-  // savedPeerId may be undefined for direct messages in Saved Messages,
-  // so we should not require it to be truthy - only check its presence.
-  const isSavedMessage = (msg as MessageWithText).savedPeerId !== undefined;
-  if (msg.out || isSavedMessage) {
+  const savedMessage = (msg as MessageWithText).savedPeerId;
+  if (msg.out || savedMessage) {
     const cmd = getCommandFromMessage(msg);
     if (cmd) {
       const isEdited = event instanceof EditedMessageEvent;
