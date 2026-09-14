@@ -322,7 +322,8 @@ const statusMessage = await client.sendMessage(msg.chatId ?? msg.peerId, {
     },
 
     pmr: async (msg) => {
-      await msg.delete({ revoke: false });
+      // Don't delete the command message - just let PM2 restart
+      // Deleting in channels can cause archiving issues
       scheduleTrackedTimeout(async () => {
         try {
           await execFileAsync("pm2", ["restart", "telebox"]);
