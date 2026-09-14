@@ -1,3 +1,4 @@
+import {debugDiagnostic} from "../diagnostics";
 import {bold, text} from "../ui/text";
 import {deliverPages, deliveryErrorCategory, interruptedNotice, PAGE_LABEL_RESERVE, pageLabel,
   renderDocument, section} from "../ui/document";
@@ -143,7 +144,7 @@ function command(ownerId?: string): CommandDefinition {
       if (stopped || statusUpdate) return;
       statusUpdate = ctx.telegram.edit(invocation.message,
         progress(Math.round((Date.now() - started) / 1_000)), {parseMode: "html"})
-        .catch(() => undefined)
+        .catch(() => {if (!ctx.signal.aborted) debugDiagnostic("exec.progress_failed");})
         .finally(() => { statusUpdate = undefined; });
     }, 2_000);
     const stopProgress = ctx.tasks.add("exec:status-interval", async () => {

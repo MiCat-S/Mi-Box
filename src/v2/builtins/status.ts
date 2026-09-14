@@ -1,3 +1,4 @@
+import {debugDiagnostic} from "../diagnostics";
 import os from "node:os";
 import path from "node:path";
 import {performance} from "node:perf_hooks";
@@ -101,7 +102,7 @@ export function parseOsRelease(source: string): string | undefined {
   const value = row.slice("PRETTY_NAME=".length).trim();
   if (!value) return;
   if (value.startsWith('"') && value.endsWith('"')) {
-    try { return JSON.parse(value) as string; } catch {}
+    try { return JSON.parse(value) as string; } catch {debugDiagnostic("status.os_release_parse_failed");}
   }
   if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
   return value;
@@ -112,7 +113,7 @@ async function operatingSystem(): Promise<string> {
     try {
       const name = parseOsRelease(await readFile("/etc/os-release", "utf8"));
       if (name) return name;
-    } catch {}
+    } catch {debugDiagnostic("status.os_release_read_failed");}
   }
   return `${os.type()} ${os.release()}`;
 }

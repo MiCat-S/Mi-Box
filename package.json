@@ -1,12 +1,12 @@
 {
   "name": "telebox",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "",
   "scripts": {
     "start": "node dist/v2/index.js --serve",
     "login": "node scripts/login-v2.cjs",
     "service:install": "bash scripts/install-service.sh",
-    "dev": "node scripts/build-v2.cjs && node dist/v2/index.js --serve",
+    "dev": "node scripts/build-v2.cjs && NODE_ENV=development node dist/v2/index.js --serve",
     "build": "node scripts/build-v2.cjs",
     "test": "node scripts/test-v2.cjs",
     "check": "node dist/v2/index.js --check",
@@ -93,10 +93,10 @@
   },
   "allowScripts": {
     "better-sqlite3@13.0.2": true,
-    "canvas@3.2.1": true,
+    "canvas@3.2.3": true,
     "cpu-features@0.0.10": true,
     "esbuild@0.28.1": true,
     "fsevents@2.3.3": true,
-    "ssh2@1.15.0": true
+    "ssh2@1.17.0": true
   }
 }

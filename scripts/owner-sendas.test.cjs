@@ -6,7 +6,8 @@ const {Api} = require('teleproto');
 const {messageEnvelope} = require('../dist/v2/telegram.js');
 const {buildPlugin} = require('./build-v2-plugin.cjs');
 const root = path.resolve(__dirname, '..');
-const {artifactDir} = buildPlugin({id: 'sure', packageRoot: path.resolve(root, '../TeleBox-Plugins/sure'), entry: 'v2.ts'});
+const plugins = require('./test-v2-paths.cjs').findPlugins(root);
+const artifactDir = plugins ? buildPlugin({id: 'sure', packageRoot: path.join(plugins, 'sure'), entry: 'v2.ts'}).artifactDir : undefined;
 const factories = {
   exec: () => require('../dist/v2/builtins/exec.js').default(),
   bf: () => require('../dist/v2/builtins/bf.js').default(root),
@@ -20,7 +21,9 @@ function envelope(text) {
   return messageEnvelope(new Api.Message({id: 7, peerId: new Api.PeerChannel({channelId: 456n}),
     fromId: new Api.PeerChannel({channelId: 789n}), out: true, date: 1, message: text}));
 }
-for (const id of Object.keys(factories)) test(`${id} authorizes owner group send-as and rejects unproven channel identities`, async t => {
+for (const id of Object.keys(factories)) test(`${id} authorizes owner group send-as and rejects unproven channel identities`, {
+  skip: id === 'sure' && !plugins ? 'Plugin checkout unavailable; Sure integration check skipped' : false,
+}, async t => {
   const previous = process.env.TB_OWNER_ID;
   process.env.TB_OWNER_ID = '123';
   t.after(() => {if (previous === undefined) delete process.env.TB_OWNER_ID; else process.env.TB_OWNER_ID = previous;});

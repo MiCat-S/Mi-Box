@@ -76,10 +76,65 @@ TPM 仅允许账号所有者管理扩展。安装和更新从配套插件仓库�
 - 核心入口：`src/v2/index.ts`
 - 插件入口：插件目录内的 `v2.ts`
 - 打包：`npm run package:v2`
-- 测试：`npm run test:v2`，需要 Node 24 和同级插件仓库
+- 测试：`npm run test:v2`，独立检出执行 Core 测试，配套插件存在时执行完整跨仓测试
 - 离线检查：`npm run check:v2`，不会登录 Telegram
 
 每个 V2 插件只有一处业务实现：默认内置由 `src/v2/builtins` 维护，按需安装的扩展由插件仓库维护。`leech`、`re`、`sure` 使用扩展实现；`ai`、`gt` 同样通过 TPM 按需安装。历史兼容包可保留插件身份和说明，业务命令、监听器及生命周期操作由所属实现提供。全量测试会检查跨仓库同名实现的归属。
+
+### Node.js 与本地运行
+
+开发、构建和测试统一使用 Node.js 24，版本由 `.nvmrc` 与 `engines.node` 固定。
+已安装 nvm 时，在本仓库执行：
+
+```sh
+nvm install
+nvm use
+node --version  # 应为 v24.x
+npm ci
+npm run package:v2
+npm run check:v2
+```
+
+从其他 Node 主版本切换后需要重新安装依赖，以匹配 SQLite、canvas 等原生模块的 ABI。
+生产服务仍仅支持 Linux。macOS 可使用 `npm run dev`，该命令为运行子进程设置
+`NODE_ENV=development`，启动时打印开发模式提示。需要提前安装支持
+`flock --nonblock <fd>` 的命令（Linux 使用 util-linux，macOS 可用 `brew install flock`）。
+账号锁始终启用；找不到命令会报 `FLOCK_NOT_FOUND`，不会绕过互斥。
+
+macOS 不执行 Linux `/proc` 的旧实例扫描，开发前必须手动停止旧版客户端。
+systemd 安装、更新与服务日志等命令仍需 Linux；Windows 请使用 WSL 的 Linux 环境。
+离线 `check:v2` 与测试使用临时数据和模拟传输，不登录 Telegram。
+
+### 完整测试的配套插件
+
+默认先查找同级 `mibot-plugins`，再查找 `TeleBox-Plugins`：
+
+```text
+parent-directory/
+├── Mi-Box/
+└── TeleBox-Plugins/
+```
+
+首次准备完整测试环境，在本仓库执行：
+
+```sh
+git clone --branch main https://github.com/MiCat-S/Mi-Box-Plugins.git ../TeleBox-Plugins
+npm run test:v2
+```
+
+目录名不同时可显式选择配套检出：
+
+```sh
+TELEBOX_PLUGINS_ROOT=/absolute/path/to/plugins npm run test:v2
+```
+
+没有配套插件时只跳过扩展类型检查、扩展测试和依赖扩展的跨仓断言，
+会输出明确提示；Core 类型检查、构建及测试仍执行。显式路径不存在、
+已存在的检出不完整、类型检查失败或任何测试失败，均返回非零状态。
+缺少插件的结果只代表 Core 验证，交付前需使用匹配版本的插件运行完整测试。
+
+可选字体、版本信息和更新回执读取等降级路径，使用 `DEBUG=1` 启用诊断。
+诊断仅输出固定事件名，不输出异常内容、路径、URL 或账号数据。
 
 `config.json`、`.env`、`assets/` 含账号和插件数据，不得公开上传。
 服务管理见 [运维说明](deploy/systemd/README.md)，许可证见 [LICENSE](LICENSE)。

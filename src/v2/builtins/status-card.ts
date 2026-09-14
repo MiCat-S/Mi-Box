@@ -1,6 +1,7 @@
 import {existsSync} from "node:fs";
 import path from "node:path";
 import type {StatusSnapshot} from "./status";
+import {debugDiagnostic} from "../diagnostics";
 
 type CanvasModule = typeof import("canvas");
 type CanvasContext = ReturnType<ReturnType<CanvasModule["createCanvas"]>["getContext"]>;
@@ -40,13 +41,13 @@ function ensureFont(): "full" | "labels" | undefined {
       canvas().registerFont(candidate, {family: FONT_FAMILY});
       fontCoverage = "full";
       return fontCoverage;
-    } catch {}
+    } catch {debugDiagnostic("status.system_font_failed");}
   }
   if (existsSync(BUNDLED_STATUS_FONT_PATH)) {
     try {
       canvas().registerFont(BUNDLED_STATUS_FONT_PATH, {family: FONT_FAMILY, weight: "700"});
       fontCoverage = "labels";
-    } catch {}
+    } catch {debugDiagnostic("status.bundled_font_failed");}
   }
   return fontCoverage;
 }

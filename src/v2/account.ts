@@ -8,8 +8,9 @@ import {parse as parseEnv} from "dotenv";
 import type {TelegramClientParams} from "teleproto/client/telegramBaseClient";
 
 export class AccountError extends Error {
-  constructor(readonly code: "CONFIG" | "BUSY" | "LOCK" | "PLATFORM" | "LEGACY") {
-    super(`Account startup failed: ${code}`);
+  constructor(readonly code: "CONFIG" | "BUSY" | "LOCK" | "FLOCK_NOT_FOUND" | "PLATFORM" | "LEGACY") {
+    super(`Account startup failed: ${code}` + (code === "FLOCK_NOT_FOUND"
+      ? " (install util-linux on Linux or flock on macOS and add its bin directory to PATH)" : ""));
   }
 }
 export interface AccountConfig {
@@ -71,7 +72,10 @@ export async function readEnvironment(root: string, inherited: NodeJS.ProcessEnv
 }
 
 export async function assertLegacyStopped(root: string): Promise<void> {
-  if (process.platform !== "linux") throw new AccountError("PLATFORM");
+  assertRuntimePlatform();
+  // /proc inspection is Linux-specific. macOS development requires stopping
+  // legacy clients manually; V2 instances still share the kernel account lock.
+  if (process.platform !== "linux") return;
   const directory = await fs.realpath(root);
   for (const pid of (await fs.readdir("/proc")).filter(entry => /^\d+$/.test(entry) && Number(entry) !== process.pid)) {
     try {
@@ -98,12 +102,36 @@ export async function assertLegacyStopped(root: string): Promise<void> {
   }
 }
 
+export function assertRuntimePlatform(): void {
+  if (process.platform === "linux" ||
+      (process.platform === "darwin" && process.env.NODE_ENV === "development")) return;
+  throw new AccountError("PLATFORM");
+}
+
+export async function findFlock(): Promise<string> {
+  const directories = ["/usr/bin", "/bin",
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(directory => path.isAbsolute(directory)),
+    "/usr/local/bin", "/opt/homebrew/bin"];
+  for (const directory of new Set(directories)) {
+    const executable = path.join(directory, "flock");
+    try {
+      await fs.access(executable, constants.X_OK);
+      if ((await fs.stat(executable)).isFile()) return executable;
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].some(code => isCode(error, code))) throw new AccountError("LOCK");
+    }
+  }
+  throw new AccountError("FLOCK_NOT_FOUND");
+}
+
 /** Kernel flock survives the short-lived flock utility via the inherited open
  * file description. It releases on process exit, including SIGKILL, without a
  * resident helper or unsafe stale-PID lock deletion. Never unlink the lock file. */
 export async function lockAccount(key: Buffer): Promise<() => Promise<void>> {
-  if (process.platform !== "linux" || !process.getuid) throw new AccountError("PLATFORM");
+  assertRuntimePlatform();
+  if (!process.getuid) throw new AccountError("PLATFORM");
   if (key.length !== 256) throw new AccountError("CONFIG");
+  const flock = await findFlock();
   const uid = process.getuid();
   const directory = path.join(await fs.realpath(os.tmpdir()), `telebox-v2-accounts-${uid}`);
   await fs.mkdir(directory, {mode: 0o700}).catch(error => {if (!isCode(error, "EEXIST")) throw error;});
@@ -114,7 +142,10 @@ export async function lockAccount(key: Buffer): Promise<() => Promise<void>> {
   try {
     const entry = await handle.stat();
     if (!entry.isFile() || entry.nlink !== 1 || entry.uid !== uid || (entry.mode & 0o077)) throw new AccountError("LOCK");
-    const result = spawnSync("/usr/bin/flock", ["--nonblock", "3"], {stdio: ["ignore", "ignore", "ignore", handle.fd], timeout: 5000});
+    const result = spawnSync(flock, ["--nonblock", "3"], {
+      stdio: ["ignore", "ignore", "ignore", handle.fd], timeout: 5000, shell: false,
+    });
+    if (result.error) throw new AccountError(isCode(result.error, "ENOENT") ? "FLOCK_NOT_FOUND" : "LOCK");
     if (result.status !== 0) throw new AccountError(result.status === 1 ? "BUSY" : "LOCK");
   } catch (error) {await handle.close(); throw error instanceof AccountError ? error : new AccountError("LOCK");}
   let closed = false;

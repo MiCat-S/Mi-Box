@@ -9,6 +9,7 @@ import {isOwnerOrGroupSendAs} from "../permissions";
 import type {ProcessError} from "../processes";
 import {renderCommandHelp} from "../commands";
 import {Api} from "teleproto";
+import {debugDiagnostic} from "../diagnostics";
 
 const htmlOptions = {parseMode: "html" as const, linkPreview: false} as const;
 
@@ -266,7 +267,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       try {
         const changelog = await readFile(path.join(root, "CHANGELOG.md"), "utf8");
         notes = renderReleaseNotes(selectChangelogReleases(changelog, previousVersion, currentVersion));
-      } catch {}
+      } catch {debugDiagnostic("update.changelog_read_failed");}
     }
     if (notes) lines.push(notes);
     return lines.join("\n\n");
@@ -319,7 +320,9 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       } finally {
         await handle.close();
       }
-    } catch {}
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) debugDiagnostic("update.result_read_failed");
+    }
   };
   const editReceipt = (ctx: PluginContext, receipt: Receipt, text: string) =>
     ctx.telegram.edit({id: receipt.messageId, chatId: receipt.chatId, text: "", outgoing: true}, text, htmlOptions);
@@ -386,7 +389,9 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       } finally {
         await handle.close();
       }
-    } catch {}
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) debugDiagnostic("update.automatic_result_read_failed");
+    }
   };
   const deliverAutomaticResultNow = async (ctx: PluginContext): Promise<void> => {
     const result = await readAutomaticResult();
@@ -488,7 +493,11 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       await writeFile(temporary, JSON.stringify({requestId: receipt.requestId}), {encoding: "utf8", mode: 0o600});
       await rename(temporary, requestFile);
     } catch (error) {
-      try { await unlink(temporary); } catch {}
+      try { await unlink(temporary); } catch (cleanupError) {
+        if (!(cleanupError instanceof Error && "code" in cleanupError && cleanupError.code === "ENOENT")) {
+          debugDiagnostic("update.request_cleanup_failed");
+        }
+      }
       throw error;
     }
   };
@@ -501,7 +510,8 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
 
   const showVersion = async (invocation: CommandInvocation, ctx: PluginContext): Promise<void> => {
     let version = "未知";
-    try { version = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version ?? version; } catch {}
+    try { version = JSON.parse(await readFile(path.join(root, "package.json"), "utf8")).version ?? version; }
+    catch {debugDiagnostic("update.version_read_failed");}
     await ctx.telegram.edit(invocation.message, `<b>更新状态</b>\n当前版本：<code>${escapeHtml(String(version))}</code>`, htmlOptions);
   };
 
@@ -593,7 +603,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
         try {
           const changelog = await gitText(ctx, ["show", "refs/remotes/origin/main:CHANGELOG.md"], 256 * 1024);
           notes = renderReleaseNotes(selectChangelogReleases(changelog, currentVersion, remoteVersion));
-        } catch {}
+        } catch {debugDiagnostic("update.remote_changelog_failed");}
       }
       const version = currentVersion && remoteVersion && currentVersion !== remoteVersion
         ? `可更新：<code>${escapeHtml(currentVersion)}</code> → <code>${escapeHtml(remoteVersion)}</code>`

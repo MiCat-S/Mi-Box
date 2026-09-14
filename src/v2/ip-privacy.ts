@@ -44,7 +44,9 @@ function copy<T extends object>(value: T): T {return Object.assign(Object.create
 type Entity = {offset: number; length: number; url?: string; className?: string};
 function ipLink(value: string): boolean {
   let decoded = value;
-  try {decoded = decodeURIComponent(value);} catch {}
+  try {decoded = decodeURIComponent(value);} catch {
+    if (process.env.DEBUG === "1") console.warn(JSON.stringify({level: "debug", event: "privacy.uri_decode_failed"}));
+  }
   if (maskIpText(decoded) !== decoded) return true;
   try {return isIP(new URL(decoded).hostname.replace(/^\[|\]$/g, "")) !== 0;} catch {return false;}
 }

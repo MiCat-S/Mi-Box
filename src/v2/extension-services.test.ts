@@ -9,15 +9,15 @@ import type {MessageEnvelope, TelegramPort} from "./sdk";
 import {PluginReleases, type ReleaseState} from "./releases";
 import {StorageRoot} from "./storage";
 import createTpm from "./builtins/tpm";
-import {existsSync} from "node:fs";
 
-test("AI extensions install through TPM, handle offline media and restore from saved selections", async () => {
+test("AI extensions install through TPM, handle offline media and restore from saved selections", async t => {
   const root = await realpath(path.resolve(__dirname, "../.."));
+  const {findPlugins} = require(path.join(root, "scripts/test-v2-paths.cjs"));
+  const sources = findPlugins(root) as string | undefined;
+  if (!sources) return t.skip("Plugin checkout unavailable; AI extension integration check skipped");
   const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "telebox-v2-extensions-")));
   // Dynamic package imports resolve from the deployment root, as in production.
   await symlink(path.join(root, 'node_modules'), path.join(directory, 'node_modules'), 'dir');
-  const preferred = path.resolve(root, '../mibot-plugins');
-  const sources = existsSync(preferred) ? preferred : path.resolve(root, '../TeleBox-Plugins');
   const {buildPlugin} = require(path.join(root, 'scripts/build-v2-plugin.cjs'));
   const output: string[] = [];
   const deleted: number[][] = [];

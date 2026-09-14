@@ -4,11 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
-test('Core and extensions share an id only for passive compatibility packages', () => {
+const plugins = require('./test-v2-paths.cjs').findPlugins(root);
+test('Core and extensions share an id only for passive compatibility packages', {
+  skip: plugins ? false : 'Plugin checkout unavailable; cross-repository ownership check skipped',
+}, () => {
   const {pluginIds} = require('./test-v2-plugins.cjs');
   const {buildPlugin} = require('./build-v2-plugin.cjs');
-  const preferred = path.resolve(root, '../mibot-plugins');
-  const plugins = fs.existsSync(preferred) ? preferred : path.resolve(root, '../TeleBox-Plugins');
   for (const id of pluginIds(plugins)) {
     if (!fs.existsSync(path.join(root, 'src/v2/builtins', `${id}.ts`))) continue;
     const {artifactDir} = buildPlugin({id, packageRoot: path.join(plugins, id), entry: 'v2.ts'});

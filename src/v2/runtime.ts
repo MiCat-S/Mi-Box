@@ -30,7 +30,7 @@ import createTpm from "./builtins/tpm";
 import createUpdate from "./builtins/update";
 import createAutofix from "./builtins/autofix";
 import {TeleprotoPort, messageEnvelope, subscribeMessages} from "./telegram";
-import {AccountError, assertLegacyStopped, lockAccount, readAccount, readEnvironment} from "./account";
+import {AccountError, assertLegacyStopped, assertRuntimePlatform, lockAccount, readAccount, readEnvironment} from "./account";
 import {installProtocolCompatibility, type ProtocolCompatibility, type ProtocolLogDecision} from "./protocol-compat";
 import type {ApplicationInfo} from "./sdk";
 
@@ -94,7 +94,11 @@ export async function readApplicationInfo(root: string): Promise<ApplicationInfo
 }
 
 export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult> {
-  if (process.platform !== "linux") throw new AccountError("PLATFORM");
+  assertRuntimePlatform();
+  if (process.platform !== "linux") logLine("info", "runtime.development_platform", {
+    platform: process.platform,
+    notice: "生产环境仅支持 Linux；当前为 macOS 开发模式，请先手动停止旧版客户端。",
+  });
   const root = await fs.realpath(options.root ?? process.cwd());
   const application = await readApplicationInfo(root);
   await assertLegacyStopped(root);
