@@ -15,7 +15,9 @@ function fixture(t, broken = new Set(), extra = '', index = '{}') {
     if (command[0] === 'clone') stage = options.cwd;
     if (command[0] === 'show') return {status: index === null ? 1 : 0, stdout: index ?? ''};
     return {status: 0, stdout: command[0] === 'ls-tree'
-      ? 'ai/v2.ts\nbad/v2.ts\ndig/v2.ts\nweather/v2.ts\noutdated/old/v2.ts\nlegacy/old.ts\n' + extra : ''};
+      ? 'ai/v2.ts\nbad/v2.ts\ndig/v2.ts\nweather/v2.ts\noutdated/old/v2.ts\nlegacy/old.ts\n' + extra
+      : command[0] === 'ls-remote' ? `${'f'.repeat(40)}\trefs/heads/main\n`
+      : command[0] === 'rev-parse' ? `${'f'.repeat(40)}\n` : ''};
   });
   t.mock.method(builder, 'buildPlugin', ({id}) => {
     built.push(id);
@@ -39,6 +41,13 @@ test('batch preparation uses one checkout, excludes loaded entries and isolates 
     ['sparse-checkout', 'set', '--no-cone', '/bad/v2.ts', '/bad/v2/', '/weather/v2.ts', '/weather/v2/']);
   assert.equal(f.cleaned(), true);
   assert.doesNotMatch(JSON.stringify(result), /private-build-path/);
+});
+
+test('head reads only the fixed main branch without creating a checkout', t => {
+  const f = fixture(t);
+  assert.deepEqual(f.run('head'), {head: 'f'.repeat(40)});
+  assert.deepEqual(f.gitCalls, [['ls-remote', '--heads', 'https://github.com/MiCat-S/Mi-Box-Plugins.git', 'refs/heads/main']]);
+  assert.deepEqual(f.built, []);
 });
 
 test('search reads descriptions from the same HEAD and keeps only actual V2 entries', t => {
@@ -156,7 +165,7 @@ test('batch builds isolate case-fold collision groups instead of sharing a check
 test('selected batch builds a single exact collision member but blocks two spellings together', t => {
   const f = fixture(t, new Set(), 'git_PR/v2.ts\nGIT_pr/v2.ts\n');
   assert.deepEqual(f.run('build-selected', 'git_PR'), {ids: ['GIT_pr', 'ai', 'bad', 'dig', 'git_PR', 'weather'],
-    collisions: [['GIT_pr', 'git_PR']], candidates: [{id: 'git_PR', revision: 'a'.repeat(64)}]});
+    collisions: [['GIT_pr', 'git_PR']], head: 'f'.repeat(40), candidates: [{id: 'git_PR', revision: 'a'.repeat(64)}]});
   assert.deepEqual(f.built, ['git_PR']);
   assert.deepEqual(f.run('build-selected', 'git_PR', 'GIT_pr'), {ids: ['GIT_pr', 'ai', 'bad', 'dig', 'git_PR', 'weather'],
     collisions: [['GIT_pr', 'git_PR']], candidates: [

@@ -29,6 +29,8 @@ type AutoBatch = {
   unchanged: string[];
   failed: AutoFailure[];
   inFlight?: {id: string; revision: string};
+  periodic?: boolean;
+  fingerprint?: string;
 };
 type AutoResult = {
   triggerId: string;
@@ -49,6 +51,11 @@ interface TpmAutoState extends Record<string, unknown> {
   processedTriggerIds: string[];
   notifications: AutoNotification[];
   lastResult?: AutoResult;
+  lastCheckAt?: number;
+  nextCheckAt?: number;
+  lastSuccessfulHead?: string;
+  lastSuccessfulFingerprint?: string;
+  retryIds?: string[];
 }
 
 const defaultAutoState: TpmAutoState = {
@@ -59,6 +66,7 @@ const defaultAutoState: TpmAutoState = {
   notifications: [],
 };
 const revisionPattern = /^[a-f0-9]{64}$/;
+const autoCheckIntervalMs = 10 * 60 * 1000;
 
 function descriptionFor(descriptions: Readonly<Record<string, string>>, id: string): string {
   return Object.hasOwn(descriptions, id) && typeof descriptions[id] === "string" ? descriptions[id] : "";
@@ -128,7 +136,7 @@ const tpmHelpSections: readonly HelpSection[] = Object.freeze([
       "• 插件名为 1–64 位字母、数字、下划线或连字符，以字母或数字开头；可直接复制搜索结果中的名称。\n" +
       "• 名称优先精确匹配，其次忽略大小写匹配。例如 git_pr 可匹配 git_PR，配置仍使用声明名称。出现大小写冲突时，复制提示中的完整名称执行单项操作。\n" +
       "• 安装、更新、卸载及仓库搜索由账号本人操作；支持本账号在群内以频道身份发出的新命令。\n" +
-      "• <code>{prefix}tpm auto on</code> 独立控制插件跟随更新。启用后，主程序更新成功会检查当前已安装扩展；有更新或失败时将结果发送到 Saved Messages。\n" +
+      "• <code>{prefix}tpm auto on</code> 独立控制插件更新。开启时立即检查，之后每 10 分钟检查一次；主程序更新成功也会强制检查。有更新或失败时将结果发送到 Saved Messages。关闭后不开始新周期，已在途或恢复中的批次会完成。\n" +
       "• 同时只运行一个插件管理任务。批量操作逐项执行，单个插件失败后继续处理其余插件，最后汇总成功、跳过和失败项。\n" +
       "• 批量下载或构建整体失败时，请检查仓库连接后重试；个别插件失败时，可按结果中的名称单独重试。长列表会分多条消息显示。",
   },
@@ -166,7 +174,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
   const repository = async (ctx: PluginContext, action: string, ...ids: string[]) => {
     const result = await ctx.processes.run(process.execPath, [path.join(root, "scripts/plugin-repository.cjs"), action, ...ids],
       {timeoutMs: ["build-all", "build-selected"].includes(action) ? 180000 : 30000, maxOutputBytes: 65536});
-    return JSON.parse(result.stdout.toString("utf8")) as {ids?: string[]; collisions?: string[][]; descriptions?: Record<string, string>; descriptionsAvailable?: boolean; id?: string; revision?: string; error?: string; candidates?: Candidate[]};
+    return JSON.parse(result.stdout.toString("utf8")) as {ids?: string[]; collisions?: string[][]; descriptions?: Record<string, string>; descriptionsAvailable?: boolean; id?: string; revision?: string; error?: string; candidates?: Candidate[]; head?: string};
   };
 
   const authorizeOwner = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
@@ -239,7 +247,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     const failures: Html[] = result.failed.map(item => concat(code(item.id), text(` · ${item.code}`)));
     if (result.failure) failures.unshift(text(`仓库构建 · ${result.failure.code}`));
     const output = await renderDocument({
-      title: `${getBotName()} 插件跟随更新完成`,
+      title: `${getBotName()} 插件自动更新完成`,
       subtitle: `已更新 ${result.updated.length} · 保持最新 ${result.unchanged.length} · 失败 ${failures.length}`,
       sections: [
         ...(failures.length ? [section("更新失败", failures)] : []),
@@ -279,7 +287,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
   };
 
   const completeAutoBatch = async (ctx: PluginContext, batch: AutoBatch,
-    failure?: AutoResult["failure"]): Promise<void> => {
+    failure?: AutoResult["failure"], checkedHead?: string): Promise<void> => {
     const result: AutoResult = {
       triggerId: batch.trigger.id,
       source: batch.trigger.source,
@@ -295,6 +303,15 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     const pages = shouldNotify ? await renderAutoNotifications(result) : [];
     await autoStore(ctx).update(current => {
       const processed = [...processedOf(current).filter(id => id !== batch.trigger.id), batch.trigger.id].slice(-64);
+      const successful = !failure && result.failed.length === 0;
+      const successfulFingerprint = successful && batch.targets
+        ? batch.targets.map(id => {
+          const generation = releases.snapshot().generations.find(item => item.id === id);
+          return generation ? `${id}:${generation.revision}` : "";
+        }).join("\n") : undefined;
+      const retryIds = failure
+        ? [...new Set([...(Array.isArray(current.retryIds) ? current.retryIds : []), ...(batch.targets ?? [])])].sort()
+        : result.failed.map(item => item.id);
       return {...current, schemaVersion: 1, enabled: current.enabled === true,
         pending: pendingOf(current).filter(item => item.trigger.id !== batch.trigger.id),
         processedTriggerIds: processed,
@@ -302,7 +319,10 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           ? [...notificationsOf(current).filter(item => item.triggerId !== batch.trigger.id),
             ...pages.map((text, index) => ({id: `${batch.trigger.id}:${index}`, triggerId: batch.trigger.id, text}))]
           : notificationsOf(current),
-        lastResult: result,
+        lastResult: result, lastCheckAt: result.completedAt, nextCheckAt: result.completedAt + autoCheckIntervalMs,
+        lastSuccessfulHead: successful && checkedHead && successfulFingerprint ? checkedHead : "",
+        lastSuccessfulFingerprint: successful && checkedHead && successfulFingerprint ? successfulFingerprint : "",
+        retryIds,
       };
     });
     await deliverNotifications(ctx);
@@ -316,9 +336,13 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       let batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
       if (!batch) return;
       if (!batch.targets) {
-        const targets = [...new Set(releases.snapshot().generations
-          .filter(item => item.state === "active").map(item => item.id))].sort();
-        await patchBatch(ctx, batch.trigger.id, current => ({...current, startedAt: Date.now(), targets}));
+        const state = await autoStore(ctx).read();
+        const generations = releases.snapshot().generations;
+        const retry = new Set(Array.isArray(state.retryIds) ? state.retryIds : []);
+        const installed = generations.filter(item => item.state === "active" || retry.has(item.id));
+        const targets = [...new Set(installed.map(item => item.id))].sort();
+        const fingerprint = targets.map(id => `${id}:${installed.find(item => item.id === id)!.revision}`).join("\n");
+        await patchBatch(ctx, batch.trigger.id, current => ({...current, startedAt: Date.now(), targets, fingerprint}));
         batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
         if (!batch) return;
       }
@@ -327,9 +351,29 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         await completeAutoBatch(ctx, batch);
         return;
       }
+      if (batch.periodic) {
+        try {
+          const head = (await repository(ctx, "head")).head;
+          if (!head) throw Object.assign(new Error("Invalid repository head"), {code: "FORMAT"});
+          const state = await autoStore(ctx).read();
+          if (head === state.lastSuccessfulHead && batch.fingerprint === state.lastSuccessfulFingerprint) {
+            await patchBatch(ctx, batch.trigger.id, value => ({...value, unchanged: [...targets]}));
+            batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id) ?? batch;
+            await completeAutoBatch(ctx, batch, undefined, head);
+            return;
+          }
+        } catch (error) {
+          signal.throwIfAborted();
+          await completeAutoBatch(ctx, batch, {stage: "repository", code: errorCode(error)});
+          return;
+        }
+      }
       let candidates: Candidate[];
+      let builtHead: string | undefined;
       try {
-        candidates = validateAutoCandidates(targets, await repository(ctx, "build-selected", ...targets));
+        const built = await repository(ctx, "build-selected", ...targets);
+        candidates = validateAutoCandidates(targets, built);
+        builtHead = built.head;
       } catch (error) {
         signal.throwIfAborted();
         batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id) ?? batch;
@@ -389,7 +433,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         }
       }
       batch = pendingOf(await autoStore(ctx).read()).find(item => item.trigger.id === initial.trigger.id);
-      if (batch) await completeAutoBatch(ctx, batch);
+      if (batch) await completeAutoBatch(ctx, batch, undefined, builtHead);
     } finally {
       busy = undefined;
     }
@@ -438,6 +482,23 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         notifications: notificationsOf(current), pending: [...pending, {
           trigger: {...trigger}, createdAt: Date.now(), updated: [], unchanged: [], failed: [],
         }]};
+    });
+    if (accepted) ensureAutoTask(ctx);
+  };
+
+  const schedulePeriodicCheck = async (ctx: PluginContext, immediate = false): Promise<void> => {
+    let accepted = false;
+    await autoStore(ctx).update(current => {
+      const pending = pendingOf(current);
+      const due = immediate || typeof current.nextCheckAt !== "number" || current.nextCheckAt <= Date.now();
+      if (current.enabled !== true || !due || pending.some(batch => batch.periodic)) return {...current,
+        schemaVersion: 1, enabled: current.enabled === true, pending, processedTriggerIds: processedOf(current),
+        notifications: notificationsOf(current)};
+      accepted = true;
+      return {...current, schemaVersion: 1, pending: [...pending, {
+        trigger: {id: `periodic:${Date.now()}`, source: "automatic"}, createdAt: Date.now(), periodic: true,
+        updated: [], unchanged: [], failed: [],
+      }], processedTriggerIds: processedOf(current), notifications: notificationsOf(current)};
     });
     if (accepted) ensureAutoTask(ctx);
   };
@@ -582,6 +643,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         stage(removing ? "unload" : "activate");
         const completedIds: string[] = [];
         const skipped = new Set(all && !updating && !removing ? result.ids.filter(value => excluded.has(value)) : defaults);
+        const unchanged = new Set<string>();
         const failed: {id: string; code: string}[] = [];
         for (const [index, candidate] of result.candidates.entries()) {
           ctx.signal.throwIfAborted();
@@ -594,8 +656,10 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
           else {
             try {
               if (removing) await releases.remove(candidate.id);
+              else if (updating && releases.snapshot().generations.some(item => item.id === candidate.id &&
+                  item.state === "active" && item.revision === candidate.revision)) unchanged.add(candidate.id);
               else await releases.activate(candidate.id, candidate.revision!);
-              completedIds.push(candidate.id);
+              if (!updating || !unchanged.has(candidate.id)) completedIds.push(candidate.id);
             }
             catch (error) {ctx.signal.throwIfAborted(); failure = errorCode(error);}
           }
@@ -622,10 +686,13 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
             : undefined;
         const output = await renderDocument({
           title: `${getBotName()} 插件批量${verb}完成`,
-          subtitle: `成功 ${completedIds.length} · 跳过 ${skipped.size} · 失败 ${failed.length}`,
+          subtitle: updating
+            ? `已更新 ${completedIds.length} · 保持最新 ${unchanged.size} · 失败 ${failed.length}`
+            : `成功 ${completedIds.length} · 跳过 ${skipped.size} · 失败 ${failed.length}`,
           sections: [
             ...(failed.length ? [section(`${verb}失败`, failed.map(item => concat(code(item.id), text(` · ${item.code}`))))] : []),
             ...(completedIds.length ? [section(`已${verb} · ${completedIds.length}`, await compactList(completedIds))] : []),
+            ...(unchanged.size ? [section(`保持最新 · ${unchanged.size}`, await compactList([...unchanged]))] : []),
             ...(skipped.size ? [section(`${all ? "已安装或默认模块" : "默认模块"} · ${skipped.size}`, await compactList([...skipped]))] : []),
           ],
           footer: [...(removing ? [text("插件配置数据已保留")] : []),
@@ -675,6 +742,13 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         if (host.pluginState(canonical) && !installed) {
           await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
         }
+        const current = releases.snapshot().generations.find(item => item.id === canonical && item.state === "active");
+        if (action === "update" && current?.revision === candidate.revision) {
+          await ctx.telegram.edit(invocation.message, renderFeedback({
+            state: "success", title: "保持最新", detail: `${canonical} · 无需更新`,
+          }), htmlOptions);
+          return;
+        }
         stage("activate");
         await releases.activate(canonical, candidate.revision);
         await ctx.telegram.edit(invocation.message, renderFeedback({
@@ -691,10 +765,14 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       await ctx.telegram.edit(invocation.message, `用法：${invocation.prefix}tpm auto [on|off]`);
       return;
     }
+    let turnedOn = false;
     if (action) {
-      await autoStore(ctx).update(current => ({...current, schemaVersion: 1, enabled: action === "on",
-        pending: pendingOf(current), processedTriggerIds: processedOf(current), notifications: notificationsOf(current),
-      }));
+      await autoStore(ctx).update(current => {
+        turnedOn = action === "on" && current.enabled !== true;
+        return {...current, schemaVersion: 1, enabled: action === "on",
+          pending: pendingOf(current), processedTriggerIds: processedOf(current), notifications: notificationsOf(current)};
+      });
+      if (turnedOn) await schedulePeriodicCheck(ctx, true);
     }
     const state = await autoStore(ctx).read();
     const last = state.lastResult;
@@ -702,9 +780,11 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       ? `已更新 ${last.updated.length} · 保持最新 ${last.unchanged.length} · 失败 ${last.failed.length + (last.failure ? 1 : 0)}`
       : "尚未运行";
     await ctx.telegram.edit(invocation.message,
-      `<b>插件跟随更新：${state.enabled === true ? "开启" : "关闭"}</b>\n` +
+      `<b>插件自动更新：${state.enabled === true ? "开启" : "关闭"}</b>\n` +
       `待处理批次：${pendingOf(state).length}${busy === "automatic" ? "（正在执行）" : ""}\n` +
-      `最近运行：${last ? formatAutoTime(last.completedAt) : "无"}\n最近结果：${result}`, htmlOptions);
+      `上次检查：${state.lastCheckAt ? formatAutoTime(state.lastCheckAt) : "无"}\n` +
+      `下次检查：${state.enabled === true && state.nextCheckAt ? formatAutoTime(state.nextCheckAt) : "无"}\n` +
+      `最近结果：${result}\n待重试项：${Array.isArray(state.retryIds) ? state.retryIds.length : 0}`, htmlOptions);
   };
 
   const tpmHelpOptions = (prefix: string) => ({
@@ -756,7 +836,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       },
       auto: {
         group: "🔄 更新插件", args: "[on|off]",
-        description: "查看或控制主程序更新成功后的插件跟随更新；仅处理当前已安装扩展。",
+        description: "查看或控制已安装扩展的独立更新检查；开启后立即检查并每 10 分钟检查一次。",
         arguments: [{name: "on|off", description: "省略时查看状态、最近运行时间和最近结果。"}],
         examples: [{args: "auto"}, {args: "auto on"}, {args: "auto off"}],
         handle: autoStatus,
@@ -788,6 +868,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       cron: "* * * * *",
       description: "恢复 TPM 跟随更新任务并发送待处理结果",
       async handle(ctx) {
+        await schedulePeriodicCheck(ctx);
         ensureAutoTask(ctx);
         await deliverNotifications(ctx);
       },
@@ -797,6 +878,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     const ctx = context;
     if (!ctx || recoveryStarted) return;
     recoveryStarted = true;
+    await schedulePeriodicCheck(ctx);
     ensureAutoTask(ctx);
   }});
 }

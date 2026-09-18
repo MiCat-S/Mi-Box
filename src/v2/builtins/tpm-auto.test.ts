@@ -27,6 +27,7 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 1000
 async function fixture(t: TestContext, options: {
   generations?: {id: string; revision: string; state: "active" | "failed"}[];
   repository?: (args: readonly string[]) => unknown | Promise<unknown>;
+  head?: () => string;
   activate?: (id: string, revision: string) => void | Promise<void>;
   send?: (text: string) => void | Promise<void>;
 } = {}) {
@@ -61,6 +62,7 @@ async function fixture(t: TestContext, options: {
     log: {info() {}, error(event: string) { logs.push(event); }},
     processes: {run: async (_command: string, args: readonly string[]) => {
       calls.push([...args]);
+      if (args[1] === "head") return {stdout: Buffer.from(JSON.stringify({head: options.head?.() ?? "e".repeat(40)})), stderr: Buffer.alloc(0), exitCode: 0};
       const value = await options.repository?.(args);
       return {stdout: Buffer.from(JSON.stringify(value ?? {ids: [], candidates: []})), stderr: Buffer.alloc(0), exitCode: 0};
     }},
@@ -103,16 +105,15 @@ test("TPM auto commands enforce ownership and persist status with the latest res
 
   await f.run(["auto", "on"]);
   assert.equal((await f.state.read()).enabled, true);
-  assert.match(f.edits.at(-1)!, /插件跟随更新：开启/);
-  await f.plugin.followSuccessfulUpdate({id: "manual:first", source: "manual"});
+  assert.match(f.edits.at(-1)!, /插件自动更新：开启/);
   await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
   await f.run(["auto"]);
-  assert.match(f.edits.at(-1)!, /最近运行：20/);
+  assert.match(f.edits.at(-1)!, /上次检查：20/);
   assert.match(f.edits.at(-1)!, /已更新 0 · 保持最新 0 · 失败 0/);
 
   await f.run(["auto", "off"]);
   assert.equal((await f.state.read()).enabled, false);
-  assert.match(f.edits.at(-1)!, /插件跟随更新：关闭/);
+  assert.match(f.edits.at(-1)!, /插件自动更新：关闭/);
   assert.match(f.plugin.renderHelp!("."), /\.tpm auto \[on\|off\]/);
 });
 
@@ -138,7 +139,6 @@ test("TPM auto builds only installed extensions, switches changed revisions, and
     },
   });
   await f.run(["auto", "on"]);
-  await f.plugin.followSuccessfulUpdate({id: "automatic:one", source: "automatic"});
   await waitFor(() => f.messages.length === 1);
 
   assert.deepEqual(f.activations, [`bad:${FAILED}`, `dig:${NEW}`]);
@@ -156,9 +156,11 @@ test("TPM auto builds only installed extensions, switches changed revisions, and
   assert.equal(result.failed.length, 2);
 
   await f.plugin.followSuccessfulUpdate({id: "automatic:one", source: "automatic"});
+  await f.plugin.followSuccessfulUpdate({id: "automatic:one", source: "automatic"});
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 1);
-  assert.equal(f.messages.length, 1);
+  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 2);
+  assert.equal(f.messages.length, 2);
 });
 
 test("TPM auto stays silent when every revision is current and reports repository failure", async t => {
@@ -171,7 +173,6 @@ test("TPM auto stays silent when every revision is current and reports repositor
     },
   });
   await f.run(["auto", "on"]);
-  await f.plugin.followSuccessfulUpdate({id: "manual:same", source: "manual"});
   await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
   assert.equal(f.messages.length, 0);
   assert.deepEqual(f.activations, []);
@@ -206,7 +207,7 @@ test("TPM auto waits for manual work, rejects new management commands, and finis
       return {ids: ["dig"], candidates: [{id: "dig", revision: NEW}]};
     },
   });
-  await f.run(["auto", "on"]);
+  await f.state.update(current => ({...current, enabled: true}));
   const manual = f.run(["search"]);
   await sawSearch;
   await f.plugin.followSuccessfulUpdate({id: "manual:wait", source: "manual"});
@@ -250,4 +251,122 @@ test("TPM notifyReady recovers in-flight activation and retries a pending Saved 
   assert.equal(f.messages.length, 1);
   assert.match(f.messages[0].text, /已更新 · 1[\s\S]*<code>dig<\/code>/);
   assert.equal(((await f.state.read()).notifications as unknown[]).length, 0);
+});
+
+test("TPM periodic checks reuse a successful HEAD and retry after a forced failure", async t => {
+  let candidate = NEW;
+  let failActivation = false;
+  let failHead = false;
+  const f = await fixture(t, {
+    generations: [{id: "dig", revision: OLD, state: "active"}],
+    repository: () => ({head: "e".repeat(40), ids: ["dig"], candidates: [{id: "dig", revision: candidate}]}),
+    head() { if (failHead) throw Object.assign(new Error("offline"), {code: "TIMED_OUT"}); return "e".repeat(40); },
+    activate(_id) {
+      if (failActivation) {
+        f.generations[0].state = "failed";
+        throw Object.assign(new Error("activation failed"), {code: "ACTIVATE"});
+      }
+    },
+  });
+  await f.run(["auto", "on"]);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.deepEqual(f.activations, [`dig:${NEW}`]);
+
+  const initialHeads = f.calls.filter(args => args[1] === "head").length;
+  await f.run(["auto", "on"]);
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  assert.equal(f.calls.filter(args => args[1] === "head").length, initialHeads);
+
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 1);
+  assert.deepEqual(((await f.state.read()).lastResult as {unchanged: string[]}).unchanged, ["dig"]);
+
+  candidate = FAILED;
+  failActivation = true;
+  await f.plugin.followSuccessfulUpdate({id: "automatic:forced", source: "automatic"});
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.generations[0].state, "failed");
+
+  failHead = true;
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.deepEqual((await f.state.read()).retryIds, ["dig"]);
+
+  failHead = false;
+  failActivation = false;
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 3);
+  assert.equal(f.generations[0].revision, FAILED);
+  assert.equal(f.generations[0].state, "active");
+
+  await f.run(["auto", "off"]);
+  const heads = f.calls.filter(args => args[1] === "head").length;
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  assert.equal(f.calls.filter(args => args[1] === "head").length, heads);
+});
+
+test("TPM checkpoints the cloned HEAD and invalidates it when installed revisions change", async t => {
+  let remoteHead = "e".repeat(40);
+  const clonedHead = "f".repeat(40);
+  const f = await fixture(t, {
+    generations: [{id: "dig", revision: OLD, state: "active"}],
+    head: () => remoteHead,
+    repository(args) {
+      const targets = args.slice(2);
+      return {head: clonedHead, ids: targets, candidates: targets.map(id => ({id, revision: NEW}))};
+    },
+  });
+  await f.run(["auto", "on"]);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal((await f.state.read()).lastSuccessfulHead, clonedHead);
+
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 2);
+
+  remoteHead = clonedHead;
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 2);
+
+  f.generations[0].revision = OLD;
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 3);
+
+  f.generations.push({id: "weather", revision: OLD, state: "active"});
+  await f.state.update(current => ({...current, nextCheckAt: 0}));
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.calls.filter(args => args[1] === "build-selected").length, 4);
+});
+
+test("TPM periodic check starts exactly at the ten minute boundary", async t => {
+  const lastCheckAt = 1_700_000_000_000;
+  const nextCheckAt = lastCheckAt + 600_000;
+  let now = nextCheckAt - 1;
+  t.mock.method(Date, "now", () => now);
+  const f = await fixture(t, {
+    generations: [{id: "dig", revision: SAME, state: "active"}],
+    repository: () => ({head: "e".repeat(40), ids: ["dig"], candidates: [{id: "dig", revision: SAME}]}),
+  });
+  await f.state.update(current => ({...current, enabled: true, lastCheckAt, nextCheckAt}));
+  assert.equal(nextCheckAt - lastCheckAt, 600_000);
+
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  assert.equal(f.calls.filter(args => args[1] === "head").length, 0);
+
+  now = nextCheckAt;
+  await f.plugin.jobs!.autoNotification.handle(f.ctx, f.scope.signal);
+  await waitFor(async () => ((await f.state.read()).pending as unknown[]).length === 0);
+  assert.equal(f.calls.filter(args => args[1] === "head").length, 1);
 });

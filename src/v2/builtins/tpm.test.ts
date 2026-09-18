@@ -18,14 +18,15 @@ function fixture() {
   const edits: string[] = [];
   const operations: string[] = [];
   const failures: unknown[] = [];
-  const generations: {id: string; state: string}[] = [];
+  const generations: {id: string; state: string; revision?: string}[] = [];
   const host = {
     pluginState: (id: string) => ["help", "ping"].includes(id) || generations.some(g => g.id === id) ? "active" : undefined,
     listPlugins: () => ["help", "ping", ...generations.map(g => g.id)].map(id => ({id})),
   };
-  const releases = {snapshot: () => ({generations}), async activate(id: string) {
+  const releases = {snapshot: () => ({generations}), async activate(id: string, revision?: string) {
     operations.push(`activate:${id}`); const existing = generations.find(g => g.id === id);
-    if (existing) existing.state = "active"; else generations.push({id, state: "active"});
+    if (existing) { existing.state = "active"; existing.revision = revision; }
+    else generations.push({id, state: "active", revision});
   }, async remove(id: string) {operations.push(`remove:${id}`); const index = generations.findIndex(g => g.id === id); if (index >= 0) generations.splice(index, 1);}};
   const ctx = {signal: new AbortController().signal, log: {error: (_event: string, fields: unknown) => failures.push(fields)},
     telegram: {async getReply() {return undefined;}, async edit(_m: unknown, text: string) {edits.push(text);},
@@ -288,7 +289,7 @@ test("TPM manages ai and gt as ordinary extensions in selected and all operation
   assert.deepEqual(f.generations, []);
   await f.run(['install', 'ai', 'gt']);
   assert.deepEqual(f.operations, ['build-all', 'activate:ai', 'activate:gt',
-    'build-selected', 'activate:ai', 'activate:gt', 'remove:ai', 'remove:gt',
+    'build-selected', 'remove:ai', 'remove:gt',
     'build-selected', 'activate:ai', 'activate:gt']);
 });
 test("TPM protects defaults and rejects unprivileged or invalid install requests", async () => {
@@ -405,7 +406,7 @@ test("TPM update all selects only installed extensions in one build and preserve
   await f.run(["update", "all"], "1", channelMessage());
   assert.deepEqual(f.operations, ["build-selected", "activate:dig", "activate:weather"]);
   assert.equal(f.generations.length, 2);
-  assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /批量更新完成[\s\S]*成功 2 · 跳过 0 · 失败 0/);
+  assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /批量更新完成[\s\S]*已更新 2 · 保持最新 0 · 失败 0/);
 });
 
 test("TPM update all continues missing, build and activation failures without removing installed entries", async () => {
@@ -424,7 +425,7 @@ test("TPM update all continues missing, build and activation failures without re
   assert.deepEqual(f.operations, ["activate:dig"]);
   assert.equal(f.generations.length, 4);
   const visible = HTMLParser.parse(f.edits.at(-1)!)[0];
-  assert.match(visible, /成功 1 · 跳过 0 · 失败 3/);
+  assert.match(visible, /已更新 1 · 保持最新 0 · 失败 3/);
   assert.match(visible, /absent · NOT_AVAILABLE/);
   assert.match(visible, /bad · BUILD/);
   assert.match(visible, /conflict · ACTIVATE/);
@@ -499,7 +500,7 @@ test("TPM batch results show failures before expandable success details", async 
   await f.run(["update", "all"]);
   const result = f.edits.at(-1)!;
   const visible = HTMLParser.parse(result)[0];
-  assert.match(visible, /成功 114 · 跳过 0 · 失败 1/);
+  assert.match(visible, /已更新 114 · 保持最新 0 · 失败 1/);
   assert.ok(result.indexOf("plugin_114") < result.indexOf("<blockquote"));
   assert.ok(result.length <= 3500);
   assert.ok(HTMLParser.parse(result)[1].length <= 90);
@@ -592,6 +593,20 @@ test("TPM installs a selected list once and preserves installed-target update se
   await f.run(['i', ...ids, 'aban']);
   assert.deepEqual(f.operations, ['build-selected', ...ids.map(id => `activate:${id}`)]);
   assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /成功 20 · 跳过 0 · 失败 0/);
+});
+
+test("TPM update keeps matching revisions current without activating them", async () => {
+  const f = fixture();
+  f.generations.push({id: "dig", state: "active", revision: "a".repeat(64)});
+  await f.run(["update", "dig"]);
+  assert.deepEqual(f.operations, ["build"]);
+  assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /保持最新[\s\S]*无需更新/);
+
+  f.operations.length = 0;
+  f.generations.push({id: "weather", state: "active", revision: "b".repeat(64)});
+  await f.run(["update", "dig", "weather", "missing"]);
+  assert.deepEqual(f.operations, ["build-selected", "activate:weather", "activate:missing"]);
+  assert.match(HTMLParser.parse(f.edits.at(-1)!)[0], /已更新 2 · 保持最新 1 · 失败 0/);
 });
 
 test("TPM selected batches report partial failures and skip default modules", async () => {

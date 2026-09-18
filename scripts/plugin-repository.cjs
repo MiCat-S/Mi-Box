@@ -7,22 +7,30 @@ const {buildPlugin} = require('./build-v2-plugin.cjs');
 
 function run(action, ...targets) {
   const validId = value => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value);
-  if (!['search', 'build', 'build-all', 'build-selected'].includes(action) ||
+  if (!['head', 'search', 'build', 'build-all', 'build-selected'].includes(action) ||
       action === 'build' && (targets.length !== 1 || !validId(targets[0])) ||
       ['build-all', 'build-selected'].includes(action) && targets.some(id => !validId(id))) throw new Error('Invalid plugin request');
+  const repositoryUrl = 'https://github.com/MiCat-S/Mi-Box-Plugins.git';
+  const git = (args, cwd) => {
+    const result = spawnSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args],
+      {cwd, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
+        env: {...process.env, GIT_TERMINAL_PROMPT: '0'}});
+    if (result.error || result.status !== 0) throw new Error('Plugin repository unavailable');
+    return result.stdout;
+  };
+  if (action === 'head') {
+    if (targets.length) throw new Error('Invalid plugin request');
+    const head = git(['ls-remote', '--heads', repositoryUrl, 'refs/heads/main']).trim().split(/\s+/)[0];
+    if (!/^[a-f0-9]{40,64}$/.test(head)) throw new Error('Plugin repository unavailable');
+    return {head};
+  }
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'mibot-plugins-'));
   try {
     const repository = path.join(stage, 'repository');
-    const git = (args, cwd) => {
-      const result = spawnSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args],
-        {cwd, encoding: 'utf8', timeout: 60000, maxBuffer: 1024 * 1024,
-          env: {...process.env, GIT_TERMINAL_PROMPT: '0'}});
-      if (result.error || result.status !== 0) throw new Error('Plugin repository unavailable');
-      return result.stdout;
-    };
     git(['clone', '--filter=blob:none', '--no-checkout', '--depth=1', '--branch=main',
-      '--single-branch', 'https://github.com/MiCat-S/Mi-Box-Plugins.git', repository],
+      '--single-branch', repositoryUrl, repository],
       stage);
+    const head = git(['rev-parse', 'HEAD'], repository).trim();
     const ids = git(['ls-tree', '-r', '--name-only', 'HEAD'], repository).split('\n')
       .filter(file => /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/v2\.ts$/.test(file))
       .map(file => file.split('/')[0]).sort();
@@ -100,7 +108,7 @@ function run(action, ...targets) {
         return {id, revision: manifest.revision};
       } catch { return {id, error: 'BUILD'}; }
     });
-    return {ids, collisions, candidates: [...candidates, ...conflicts, ...missing]};
+    return {ids, collisions, head, candidates: [...candidates, ...conflicts, ...missing]};
   } finally {fs.rmSync(stage, {recursive: true, force: true});}
 }
 if (require.main === module) {
