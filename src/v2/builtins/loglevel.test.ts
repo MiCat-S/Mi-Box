@@ -27,7 +27,7 @@ async function fixture(t: TestContext, options: {native?: TelegramPort["withClie
   const edits: string[] = [];
   const levels: string[] = [];
   const client = {setLogLevel(level: string) {levels.push(level);}} as TelegramClient;
-  const host = new PluginHost({storageRoot: root, logger, aliases: {ll: "loglevel"}, prefixes: [".", "!"], telegram: {
+  const host = new PluginHost({storageRoot: root, selfId: "1", logger, aliases: {ll: "loglevel"}, prefixes: [".", "!"], telegram: {
     edit: options.edit ?? (async (_message, text, mode) => {assert.equal(mode.parseMode, "html"); edits.push(text);}),
     async reply() {assert.fail("unexpected reply");},
     async getReply() {assert.fail("unexpected reply read");},

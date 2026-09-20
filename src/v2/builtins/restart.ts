@@ -35,7 +35,7 @@ export default function createRestart(ownerId: string, shutdownSignal?: AbortSig
         rows.push(`${escapeHtml(field)}: unavailable`);
       }
     }
-    return rows.join("<br>");
+    return rows.join("\n");
   };
   const processOwnerHint = (): string => {
     try {

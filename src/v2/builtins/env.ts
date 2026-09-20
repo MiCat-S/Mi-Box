@@ -2,9 +2,15 @@ import {bold} from "../ui/text";
 import {STRUCTURED_PLUGIN_API_VERSION, definePlugin, type CommandDefinition} from "../sdk";
 import {renderCommandHelp} from "../commands";
 
-const visible = new Set(["NODE_ENV", "TB_PREFIX", "TB_CMD_IGNORE_EDITED", "TB_LISTENER_HANDLE_EDITED"]);
+const visible = new Set(["NODE_ENV", "TB_PREFIX"]);
 
-const envCommand: CommandDefinition = {
+/**
+ * The runtime resolves the deployment `.env` into an explicit environment
+ * snapshot instead of mutating process.env, so this command must read that same
+ * snapshot; process.env alone never contains the file's values.
+ */
+function command(environment: NodeJS.ProcessEnv): CommandDefinition {
+  return {
   description: "查看运行环境",
   helpArgs: ["help", "h"],
   args: "[变量名]",
@@ -14,13 +20,12 @@ const envCommand: CommandDefinition = {
     {
       heading: "可查询项目：",
       body: "• NODE_ENV：运行环境标识\n" +
-        "• TB_PREFIX：环境中的命令前缀配置\n" +
-        "• TB_CMD_IGNORE_EDITED：命令处理编辑消息的环境设置\n" +
-        "• TB_LISTENER_HANDLE_EDITED：监听器处理编辑消息的环境设置",
+        "• TB_PREFIX：环境中的命令前缀配置",
     },
     {
       heading: "结果说明：",
-      body: "• “未设置”表示当前进程没有该环境变量。\n" +
+      body: "• 取值来自启动时的进程环境与部署目录的 <code>.env</code>，进程环境优先。\n" +
+        "• “未设置”表示两者都没有该变量。\n" +
         "• “无可显示配置”表示变量名不在上述查询范围。\n" +
         "• 这里展示环境值；查看当前生效的命令前缀使用 <code>{prefix}prefix</code>。\n" +
         "• 本命令用于查询。前缀修改使用 <code>{prefix}help prefix</code> 中的命令。",
@@ -28,12 +33,14 @@ const envCommand: CommandDefinition = {
   ],
   async handle(invocation, ctx) {
     const name = invocation.args[0];
-    const rows = [...visible].filter(key => !name || key === name).map(key => `${key}=${process.env[key] ?? "未设置"}`);
+    const rows = [...visible].filter(key => !name || key === name).map(key => `${key}=${environment[key] ?? "未设置"}`);
     await ctx.telegram.edit(invocation.message, `<code>${rows.join("\n") || "无可显示配置"}</code>`, {parseMode: "html"});
   },
-};
+  };
+}
 
-export default function createEnv() {
+export default function createEnv(environment: NodeJS.ProcessEnv = process.env) {
+  const envCommand = command(environment);
   return definePlugin({
     apiVersion: STRUCTURED_PLUGIN_API_VERSION,
     id: "env",

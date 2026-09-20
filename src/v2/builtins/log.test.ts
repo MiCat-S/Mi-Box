@@ -179,7 +179,7 @@ async function hostFixture(t: TestContext) {
   const sent: string[] = [];
   const events: string[] = [];
   const forbidden = async (): Promise<never> => assert.fail("this path must not invoke external work");
-  const host = new PluginHost({storageRoot: root, tempRoot: path.join(root, "temp"), prefixes: ["."],
+  const host = new PluginHost({storageRoot: root, tempRoot: path.join(root, "temp"), prefixes: ["."], selfId: SELF,
     logger: {info(event) {events.push(`info:${event}`);}, error(event) {events.push(`error:${event}`);}},
     telegram: {async edit(_message, text) {sent.push(text);}, async reply(_message, text) {sent.push(text);},
       invoke: forbidden, getReply: forbidden, withClient: forbidden}});

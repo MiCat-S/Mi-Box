@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.1] - 2026-09-20
+
+- 收藏夹命令准入要求发送者为当前登录账号：Telegram 也会给保存对话和频道私信消息设置 saved 标记，此前这类他人消息可能进入未单独鉴权的命令。所有权限检查和本账号的群内频道身份命令保持不变。
+- `.restart` 与 `.update` 的服务状态改用换行分行显示，此前多行状态会挤成一行。
+- `.env` 改为读取运行时解析的环境快照（进程环境与部署目录 `.env`，进程环境优先）；此前通过 `.env` 配置的 `TB_PREFIX` 始终显示“未设置”。同时移除 v2 已不再读取的 `TB_CMD_IGNORE_EDITED`、`TB_LISTENER_HANDLE_EDITED` 查询项和 `.env-sample` 条目。
+- `.alias set`、`.alias del` 和 `.prefix set|add|del` 限账号本人执行，支持本账号在群内以频道身份发出的新命令；`.alias ls` 和 `.prefix` 查看保持公开。
+- 安装器不再把 `config.json` 和 `.env` 复制到部署目录之外的备份目录，备份只保留主程序、服务定义和 `assets/`。
+- `mibot.service` 启用一组 systemd 加固选项（`NoNewPrivileges`、`ProtectSystem=full`、`ProtectKernel*`、`RestrictSUIDSGID` 等）；更新用的服务保持不加固，服务文件内注明了刻意排除的选项及原因。
+
 ## [0.9.0] - 2026-09-18
 
 - TPM 手动更新按构件 revision 区分“已更新”和“保持最新”，相同活动构件不再重复激活；默认模块继续单独显示跳过。

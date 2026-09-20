@@ -11,7 +11,8 @@ import { definePlugin, type CommandInvocation, type MessageEnvelope, type Messag
 import { createAlias } from "./alias";
 
 const SECRET = "alias-secret-sentinel-64f2";
-const message: MessageEnvelope = { id: 17, chatId: "123", text: ".alias", outgoing: true };
+const OWNER = "123";
+const message: MessageEnvelope = { id: 17, chatId: OWNER, senderId: OWNER, text: ".alias", outgoing: true };
 type Store = ReturnType<PluginContext["storage"]["sqlite"]>;
 
 function deferred<T = void>() {
@@ -88,6 +89,7 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
   };
   const host = new PluginHost({
     storageRoot: root,
+    selfId: OWNER,
     telegram,
     logger: { info(event, fields) { logs.push({ event, fields }); }, error(event, fields) { logs.push({ event, fields }); } },
     prefixes: options.prefixes,
@@ -114,7 +116,7 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
       host.replaceAliases(aliases);
       publications.push({ ...aliases });
     },
-  });
+  }, OWNER);
   async function load() {
     await host.load({ ...definition, async setup(context) {
       contexts.push(context);
@@ -172,6 +174,24 @@ test("new databases use the legacy schema and successful updates publish immedia
   assert.deepEqual(f.commands[0].args, ["fixed", "extra"]);
   assert.equal(f.targetSetups(), 1);
   assert.equal(f.targetCleanups(), 0);
+});
+
+test("alias writes require the account owner while listing stays public", async t => {
+  const f = await fixture(t);
+  const outsider = { senderId: "999" };
+  assert.equal(await f.dispatch(".alias set owned ping"), true);
+  assert.deepEqual(f.rows(), [{ original: "owned", final: "ping" }]);
+  for (const text of [".alias set hijack ping", ".alias del owned"]) {
+    f.edits.length = 0;
+    assert.equal(await f.dispatch(text, outsider), true, text);
+    assert.equal(f.edits.at(-1)!.text, "只有账号本人可以管理命令别名", text);
+  }
+  // Neither the database nor the published routing table may change.
+  assert.deepEqual(f.rows(), [{ original: "owned", final: "ping" }]);
+  assert.deepEqual(f.host.configuration().aliases, { owned: "ping" });
+  f.edits.length = 0;
+  assert.equal(await f.dispatch(".alias ls", outsider), true);
+  assert.match(f.edits.at(-1)!.text, /owned -&gt; ping/);
 });
 
 test("legacy records load alongside extension columns, tables, indexes and metadata", async t => {

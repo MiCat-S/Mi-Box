@@ -33,7 +33,7 @@ async function fixture(t: TestContext, options: {entries?: string[]} = {}) {
   const edits: string[] = [];
   const events: string[] = [];
   const host = new PluginHost({
-    storageRoot: path.join(root, "assets"), tempRoot: path.join(root, "temp"), prefixes: ["."],
+    storageRoot: path.join(root, "assets"), tempRoot: path.join(root, "temp"), prefixes: ["."], selfId: SELF,
     logger: {info(event) {events.push(`info:${event}`);}, error(event) {events.push(`error:${event}`);}},
     telegram: {
       async edit(_message, text) {edits.push(text);},

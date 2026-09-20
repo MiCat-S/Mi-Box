@@ -151,7 +151,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     return rows;
   };
   const readServiceStatus = async (ctx: PluginContext): Promise<string> =>
-    (await readServiceStatusRows(ctx)).map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
+    (await readServiceStatusRows(ctx)).map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("\n");
   const parseServiceStatusMap = (statusRows: readonly ServiceStatusRow[]): Record<string, string> =>
     Object.fromEntries(statusRows.map(item => [item.key, item.value]));
   const serviceStatusHint = (statusRows: readonly ServiceStatusRow[]): string => {
@@ -624,7 +624,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
     const receipt: Receipt = {ownerId: ownerId ?? "", chatId: invocation.message.chatId,
       messageId: invocation.message.id, requestedAt: now(), bootId, requestId: randomUUID()};
     const statusRows = await readServiceStatusRows(ctx);
-    const status = statusRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
+    const status = statusRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("\n");
     const hint = serviceStatusHint(statusRows);
     if (hint) {
       await ctx.telegram.edit(invocation.message,
@@ -676,7 +676,7 @@ export default function createUpdate(root = process.cwd(), ownerId?: string, opt
       const startupRows = await readServiceStatusRows(ctx, ["LoadState", "ActiveState", "Result", "SubState", "FragmentPath"]);
       const startupHint = serviceStartupFailureHint(startupRows);
       if (startupHint) {
-        const failureStatus = startupRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("<br>");
+        const failureStatus = startupRows.map(({key, value}) => `${escapeHtml(key)}: ${escapeHtml(value)}`).join("\n");
         await finalizeReceipt(ctx, receipt,
           brandText(`<b>MiBot 更新失败</b>\n${startupHint}\n`) +
           `服务检查结果：${failureStatus}\n\n请查看服务日志：\n<code>journalctl -u ${updateService} -n 80 --no-pager</code>`);

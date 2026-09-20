@@ -4,6 +4,7 @@ import type { PluginHost } from "../host";
 import { definePlugin, STRUCTURED_PLUGIN_API_VERSION, type CommandDefinition, type CommandInvocation, type MessageEnvelope, type PluginContext, type PluginDefinition } from "../sdk";
 import type { SqliteConnection } from "../sqlite";
 import { renderCommandHelp } from "../commands";
+import { isOwnerOrGroupSendAs } from "../permissions";
 
 interface AliasRow { original: string; final: string; }
 interface AliasState {
@@ -66,7 +67,8 @@ async function temporary(context: PluginContext, message: MessageEnvelope, text:
   });
 }
 
-export function createAlias(host: Pick<PluginHost, "listCommands" | "configuration" | "replaceAliases">): PluginDefinition {
+export function createAlias(host: Pick<PluginHost, "listCommands" | "configuration" | "replaceAliases">,
+  ownerId?: string): PluginDefinition {
   const states = new WeakMap<PluginContext, AliasState>();
   const prefix = host.configuration().prefixes[0];
   const setArgs = "[别名...] [原命令...]";
@@ -144,6 +146,13 @@ export function createAlias(host: Pick<PluginHost, "listCommands" | "configurati
     // Subcommand matching stays case-sensitive to preserve the legacy behavior.
     subcommandsCaseSensitive: true,
     args: "set|del|ls",
+    // Alias writes change global command routing for the whole account, so they
+    // stay with the account owner; the read-only listing remains public.
+    authorize: async (invocation, context) => {
+      if (isOwnerOrGroupSendAs(invocation.message, ownerId)) return true;
+      await edit(context, invocation.message, "只有账号本人可以管理命令别名");
+      return false;
+    },
     subcommands: {
       set: {
         args: setArgs,
@@ -159,6 +168,7 @@ export function createAlias(host: Pick<PluginHost, "listCommands" | "configurati
       },
       ls: {
         aliases: ["list"],
+        public: true,
         description: "查看所有别名",
         handle: (invocation, context) => operate(invocation, context, "list"),
       },

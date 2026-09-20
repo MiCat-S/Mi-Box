@@ -12,7 +12,8 @@ import { renderCommandHelp } from "../commands";
 import { createPrefix } from "./prefix";
 
 const SECRET = "prefix-private-fixture-753";
-const message: MessageEnvelope = { id: 1, chatId: "123", outgoing: true, text: ".prefix" };
+const OWNER = "123";
+const message: MessageEnvelope = { id: 1, chatId: OWNER, senderId: OWNER, outgoing: true, text: ".prefix" };
 
 function deferred() {
   let resolve!: () => void;
@@ -33,7 +34,7 @@ async function fixture(t: TestContext, options: { prefixes?: string[]; persisten
   let calls = 0;
   let editGate: Promise<void> | undefined;
   const host = new PluginHost({
-    storageRoot: root, prefixes: options.prefixes ?? ["."], concurrency: 64, queueCapacity: 128,
+    storageRoot: root, prefixes: options.prefixes ?? ["."], concurrency: 64, queueCapacity: 128, selfId: OWNER,
     logger: { info(event, fields) { logs.push({ event, fields }); }, error(event, fields) { logs.push({ event, fields }); } },
     telegram: {
       async edit(_message, text, settings, signal) {
@@ -61,7 +62,7 @@ async function fixture(t: TestContext, options: { prefixes?: string[]; persisten
   }));
   const persistence = options.persistence ?? new PrefixEnvStore(file);
   async function load() {
-    const definition = createPrefix(host, persistence);
+    const definition = createPrefix(host, persistence, OWNER);
     await host.load({ ...definition, setup(context) { contexts.push(context); } });
   }
   await load();
@@ -102,6 +103,21 @@ test("view/help/h/unknown subcommands retain legacy feedback and avoid persisten
   assert.equal(await f.read(), f.source);
   assert.deepEqual(f.host.configuration().prefixes, ["."]);
   assert.ok(f.edits.every(edit => edit.options.parseMode === "html" && edit.options.linkPreview === false));
+});
+
+test("prefix mutations require the account owner while the view stays public", async t => {
+  const f = await fixture(t);
+  const outsider = { senderId: "999" };
+  for (const suffix of ["set !", "add ?", "del ."]) {
+    f.edits.length = 0;
+    await f.dispatch(`.prefix ${suffix}`, outsider);
+    assert.equal(f.edits.at(-1)!.text, "❌ 只有账号本人可以修改命令前缀", suffix);
+  }
+  assert.deepEqual(f.host.configuration().prefixes, ["."]);
+  assert.equal(await f.read(), f.source, "a denied mutation must not touch .env");
+  f.edits.length = 0;
+  await f.dispatch(".prefix", outsider);
+  assert.match(f.edits.at(-1)!.text, /当前前缀: <code>\.<\/code>/);
 });
 
 test("set/add/del deduplicate, preserve order, and publish without reloading other plugins", async t => {
@@ -259,7 +275,7 @@ test("unawaited command capability stays tracked through persistence settlement"
   const started = deferred();
   const release = deferred();
   const f = await fixture(t);
-  const definition = createPrefix(f.host, { async persist() { started.resolve(); await release.promise; } });
+  const definition = createPrefix(f.host, { async persist() { started.resolve(); await release.promise; } }, OWNER);
   const context = f.contexts[0];
   const work = definition.commands.prefix.handle({ message: { ...message, text: ".prefix add !" }, command: "prefix", prefix: ".", args: ["add", "!"] }, context);
   const rejected = assert.rejects(Promise.resolve(work));

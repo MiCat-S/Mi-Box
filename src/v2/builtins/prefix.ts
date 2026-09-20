@@ -2,6 +2,7 @@ import type { PluginHost } from "../host";
 import type { PrefixPersistence } from "../prefixes";
 import { STRUCTURED_PLUGIN_API_VERSION, definePlugin, type CommandDefinition, type PluginDefinition } from "../sdk";
 import { renderCommandHelp } from "../commands";
+import { isOwnerOrGroupSendAs } from "../permissions";
 
 type PrefixHost = Pick<PluginHost, "configuration" | "replacePrefixes">;
 const queues = new WeakMap<PrefixHost, Promise<void>>();
@@ -15,7 +16,7 @@ function list(prefixes: readonly string[]): string {
   return prefixes.map(prefix => `<code>${html(prefix)}</code>`).join(" • ");
 }
 
-export function createPrefix(host: PrefixHost, persistence: PrefixPersistence): PluginDefinition {
+export function createPrefix(host: PrefixHost, persistence: PrefixPersistence, ownerId?: string): PluginDefinition {
   // The business path keeps its first-line parser (CRLF handling and the
   // legacy help/h position); help text itself comes from the same declaration.
   const prefixCommand: CommandDefinition = {
@@ -51,6 +52,9 @@ export function createPrefix(host: PrefixHost, persistence: PrefixPersistence): 
           if (!sub) return edit(`🔧 当前前缀: ${list(current)}\n用法: <code>${html(current[0])}prefix set . ！</code>`);
           if ([sub, args[1]?.toLowerCase()].some(value => value === "help" || value === "h") ||
               !["set", "add", "del"].includes(sub)) return edit(usage);
+          // Only set/add/del reach here; they rewrite routing for the whole
+          // account and persist to .env, so they stay with the account owner.
+          if (!isOwnerOrGroupSendAs(input.message, ownerId)) return edit("❌ 只有账号本人可以修改命令前缀");
           const tokens = args.slice(1).filter(Boolean);
           if (!tokens.length) return edit(`❌ 参数不足\n\n${usage}`);
           const prefixes = [...new Set(sub === "set" ? tokens : sub === "add" ? [...current, ...tokens]

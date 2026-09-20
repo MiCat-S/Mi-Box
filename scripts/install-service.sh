@@ -83,7 +83,7 @@ backup=$(mktemp -d "$(dirname -- "$root")/mibot-install.XXXXXX")
 "$node" scripts/render-service.cjs "$backup/units"
 /usr/bin/systemd-analyze verify "$backup/units/mibot.service" "$backup/units/mibot-update.service" \
   "$backup/units/mibot-update-monitor.service" "$backup/units/mibot-update.timer"
-printf 'Backup: %s\n' "$backup"
+printf 'Backup (program, units and plugin data; no account credentials): %s\n' "$backup"
 for entry in dist/v2; do
   [[ ! -L "$entry" ]] || { echo "Refusing symlink artifact: $entry" >&2; exit 1; }
   if [[ -d "$entry" ]]; then cp -a "$entry" "$backup/$(basename "$entry")"; fi
@@ -92,10 +92,11 @@ if [[ -f "$unit" ]]; then cp -p "$unit" "$backup/service.before"; fi
 if [[ -f "$update_unit" ]]; then cp -p "$update_unit" "$backup/update-service.before"; fi
 if [[ -f "$update_monitor_unit" ]]; then cp -p "$update_monitor_unit" "$backup/update-monitor-service.before"; fi
 if [[ -f "$update_timer_unit" ]]; then cp -p "$update_timer_unit" "$backup/update-timer.before"; fi
-data=(config.json)
-if [[ -d assets ]]; then data+=(assets); fi
-if [[ -f .env ]]; then data+=(.env); fi
-tar -cf "$backup/account.tar" "${data[@]}"
+# Account credentials are never copied out of the deployment directory:
+# config.json holds the Telegram session and .env may hold secrets. The
+# installer never writes either path, and restore() leaves account data in
+# place, so a copy would only spread credentials into a directory nobody reaps.
+if [[ -d assets ]]; then tar -cf "$backup/plugin-data.tar" assets; fi
 changed=false
 restore() {
   result=$?

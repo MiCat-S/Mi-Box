@@ -484,7 +484,13 @@ export class PluginHost {
   // commands go through the separate sudo/sure policy, never this primary path.
   dispatchPrimary(message: MessageEnvelope): Promise<boolean> {
     if (this.root.signal.aborted) return Promise.reject(new ExecutorClosedError());
-    if (!message.outgoing && !message.saved) return Promise.resolve(false);
+    // `saved` alone does not prove authorship: Telegram also sets savedPeerId on
+    // saved-dialog and monoforum messages written by other senders. A non-outgoing
+    // message is admitted only when the authenticated account is provably its sender.
+    if (!message.outgoing && !(message.saved === true &&
+        this.options.selfId !== undefined && message.senderId === this.options.selfId)) {
+      return Promise.resolve(false);
+    }
     const parsed = this.parse(message.text);
     if (!parsed) return Promise.resolve(false);
     const target = this.commands.get(parsed.command);

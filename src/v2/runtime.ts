@@ -153,13 +153,13 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     });
     await host.load(createPrivacy(selfId));
     await host.load(createHelp(host, selfId));
-    await host.load(createAlias(host));
-    await host.load(createPrefix(host, new PrefixEnvStore(path.join(root, ".env"))));
+    await host.load(createAlias(host, selfId));
+    await host.load(createPrefix(host, new PrefixEnvStore(path.join(root, ".env")), selfId));
     await host.load(createLogLevel(logger, selfId));
     await host.load(createMemory());
     await host.load(createPing());
     await host.load(createStatus(root));
-    await host.load(createEnv());
+    await host.load(createEnv(environment));
     await host.load(createSysinfo());
     await host.load(createVersion(root));
     await host.load(createAgent());

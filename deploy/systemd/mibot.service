@@ -12,6 +12,27 @@ WorkingDirectory=@ROOT@
 ExecStart=@NODE@ @RUNTIME@ --serve
 Environment=@PATH@
 Environment=NODE_ENV=production
+# Hardening. Each of the following is deliberately absent because it breaks
+# this service; revisit them together with the changes named here:
+#   MemoryDenyWriteExecute - kills the V8 JIT, the process will not start.
+#   PrivateTmp             - the account mutex is an flock under os.tmpdir(); a
+#                            private /tmp stops it from excluding an instance
+#                            started outside systemd. Needs the lock moved to
+#                            /run first.
+#   ProtectHome            - the documented deployment path is /root/mibot.
+#   ProtectSystem=strict   - would also mount /tmp read-only, which the account
+#                            lock and the TPM repository staging area need.
+# The update units stay unsandboxed on purpose: they run git, npm and
+# systemctl restart against this deployment.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM

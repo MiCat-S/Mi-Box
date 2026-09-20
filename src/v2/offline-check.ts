@@ -28,7 +28,7 @@ export async function offlineCheck() {
     async invoke() {throw new Error("Network operations are unavailable during the offline check");},
     async withClient(operation, signal) {return operation(native, signal);},
   };
-  const host = new PluginHost({storageRoot: path.join(directory, "assets"), telegram, logger});
+  const host = new PluginHost({storageRoot: path.join(directory, "assets"), telegram, logger, selfId: "1"});
   const source: MessageEnvelope = {id: 1, chatId: "1", senderId: "1", outgoing: true, text: ".probe"};
   let probeCalls = 0;
   let serviceCalls = 0;
@@ -43,8 +43,8 @@ export async function offlineCheck() {
       services: {echo: {description: "Offline service", handle(input) {serviceCalls++; return input;}}},
     }));
     await host.load(createHelp(host));
-    await host.load(createAlias(host));
-    await host.load(createPrefix(host, new PrefixEnvStore(path.join(directory, ".env"))));
+    await host.load(createAlias(host, "1"));
+    await host.load(createPrefix(host, new PrefixEnvStore(path.join(directory, ".env")), "1"));
     await host.load(createLogLevel(logger));
     await host.load(createMemory());
     await host.dispatchPrimary({...source, text: ".alias set smoke probe"});
@@ -67,7 +67,7 @@ export async function offlineCheck() {
     const beforeReload = host.configuration().aliases;
     const unloaded = await host.unload("alias");
     if (!unloaded?.completed) throw new Error("Offline alias unload failed");
-    await host.load(createAlias(host));
+    await host.load(createAlias(host, "1"));
     if (host.configuration().aliases.smoke !== beforeReload.smoke) throw new Error("Offline alias persistence check failed");
     const loaded = host.listPlugins().map(plugin => plugin.id).sort();
     const lifecycle = await host.shutdown();

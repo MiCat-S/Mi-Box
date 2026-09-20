@@ -33,6 +33,18 @@ journalctl -u mibot -f
 日志由 journald 管理，按机器容量配置保留策略。卸载 PM2 前确认它没有
 管理其他程序。同一账号不能并行运行两个实例。
 
+## 沙箱
+
+`mibot.service` 启用了一组 systemd 加固选项（`NoNewPrivileges`、
+`ProtectSystem=full`、`ProtectKernel*`、`RestrictSUIDSGID` 等）。服务文件内
+注释说明了哪些选项被刻意排除及其原因，修改前先读该注释。更新用的
+`mibot-update.service` 和 `mibot-update-monitor.service` 不加固，它们需要
+执行 git、npm 和 `systemctl restart`。
+
+服务仍以 root 运行。`.exec` 和 TPM 安装的扩展拥有该身份的全部权限，
+只安装可信代码。降权到专用非 root 用户需要为 `mibot.service`、
+`mibot-update.service` 和 `mibot-update.timer` 配置 polkit 规则，属于独立改动。
+
 ## 升级
 
 1. 确认两仓库的目标提交配套，记录原提交，不强制重置未提交改动。

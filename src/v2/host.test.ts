@@ -133,12 +133,25 @@ test("plugin contexts expose current command routing without mutation access", a
 });
 
 test("primary admission and edited-message defaults preserve owner boundary", async t => {
-  const {host} = await fixture(t);
+  const {host} = await fixture(t, {selfId: "123"});
   let calls = 0;
   await host.load(plugin(() => { calls++; }));
   assert.equal(await host.dispatchPrimary({...envelope, outgoing: false}), false);
   assert.equal(await host.dispatchPrimary({...envelope, edited: true}), false);
+  // savedPeerId also appears on saved-dialog and monoforum messages written by
+  // other senders, so it never admits a message on its own.
+  assert.equal(await host.dispatchPrimary({...envelope, outgoing: false, saved: true, senderId: "456"}), false);
+  assert.equal(await host.dispatchPrimary({...envelope, outgoing: false, saved: true, senderId: undefined}), false);
   assert.equal(await host.dispatchPrimary({...envelope, outgoing: false, saved: true}), true);
+  assert.equal(calls, 1);
+});
+
+test("saved admission fails closed when the host has no authenticated account", async t => {
+  const {host} = await fixture(t);
+  let calls = 0;
+  await host.load(plugin(() => { calls++; }));
+  assert.equal(await host.dispatchPrimary({...envelope, outgoing: false, saved: true}), false);
+  assert.equal(await host.dispatchPrimary(envelope), true);
   assert.equal(calls, 1);
 });
 
