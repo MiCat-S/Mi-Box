@@ -45,6 +45,19 @@ journalctl -u mibot -f
 只安装可信代码。降权到专用非 root 用户需要为 `mibot.service`、
 `mibot-update.service` 和 `mibot-update.timer` 配置 polkit 规则，属于独立改动。
 
+## 内存
+
+启动后常驻约 110 MB，其中 Telegram 协议层的 TL 定义占大头，属固定成本。
+扩展按需加载 `sharp`、`canvas` 等依赖，装得越多常驻越高。
+
+内存紧张的机器可以给 V8 设堆上限，让回收更早触发：在 `mibot.service` 的
+`ExecStart` 中于 `@RUNTIME@` 前加 `--max-old-space-size=<MB>`。此处不预置
+数值：设得低于扩展的实际峰值会让进程 OOM，图片和视频处理类扩展尤其吃内存。
+先用 `.memory` 观察若干天的 RSS 峰值，再取峰值之上的余量。
+
+`systemctl status mibot` 显示当前占用；cgroup 级别的 `MemoryHigh=` 可以在
+超限时触发回收而不直接杀进程，`MemoryMax=` 则会直接杀，按需选择。
+
 ## 升级
 
 1. 确认两仓库的目标提交配套，记录原提交，不强制重置未提交改动。

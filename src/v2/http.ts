@@ -1,7 +1,19 @@
 import { ResourceScope } from "./lifecycle";
 import {lookup as dnsLookup, type LookupAddress} from "node:dns";
 import {BlockList, isIP} from "node:net";
-import {Agent} from "undici";
+import type {Agent} from "undici";
+
+/**
+ * Node ships its own copy of undici behind global fetch, so requiring the
+ * userland package costs a second HTTP stack (~26 MB resident). Only the
+ * denyPrivateAddresses path needs its Agent, and no Core builtin opts in, so
+ * the module is pulled in on first use instead of at startup.
+ */
+let agentConstructor: typeof Agent | undefined;
+function undiciAgent(): typeof Agent {
+  if (!agentConstructor) agentConstructor = (require("undici") as typeof import("undici")).Agent;
+  return agentConstructor;
+}
 
 const messages = {
   ABORTED: "HTTP operation was cancelled",
@@ -256,7 +268,7 @@ export class ScopedHttp {
 
   private publicDispatcher(): Agent {
     if (this.publicAgent) return this.publicAgent;
-    const agent = new Agent({connect: {lookup: createPublicLookup(this.lookup) as never}});
+    const agent = new (undiciAgent())({connect: {lookup: createPublicLookup(this.lookup) as never}});
     this.publicAgent = agent;
     this.scope.add("http-public-dispatcher", async () => {
       this.publicAgent = undefined;
