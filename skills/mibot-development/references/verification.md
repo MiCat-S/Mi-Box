@@ -32,7 +32,10 @@ Core 独立 `package:v2` / `check:v2` 不要求同级插件目录。插件候选
 
 ## 交付边界
 
-- 检查 diff、类型与相关测试后，按项目 `AGENTS.md` 处理版本和提交。Core 代码批次同步 `package.json`、lockfile 两处版本及 `CHANGELOG.md`；纯文档和 Skill 修改不递增应用代码版本。
+- 检查 diff、类型与相关测试后处理版本和提交。每批准备提交的代码修改递增一次应用版本：修复和维护递增 patch，新功能按兼容性选择 minor，破坏兼容选择 major。
+- Core 代码批次同步 `package.json`、`package-lock.json` 的 `version` 与 `packages[""].version` 三处，并在 `CHANGELOG.md` 记录该版本的日期与用户可见变化；纯文档和 Skill 修改不递增应用代码版本。
+- `.version`、`.ver` 和 `.update ver` 从应用版本配置读取，不写死版本号。
+- 提交只包含本轮相关文件。
 - 仅提交本次相关文件。当前项目要求优先由配置的 Pi agent 提交和正常推送；不可用时按已有授权自行完成。目标分支由会话和实际工作树确定，不擅自合并或强推。
 - SDK 能力变化须注明升级顺序：先升级支持所需声明能力的 Core，再安装相应插件。扩展更新说明给出 `.tpm update <id>`，Core 更新说明给出 `.update`。
 - 说明已验证的行为、失败检查和剩余限制。单元测试、真实序列化、Host 集成、线上部署与真实账号测试分别报告，不能互相替代。

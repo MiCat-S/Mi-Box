@@ -9,7 +9,7 @@ description: 开发、修复或评审 MiBot（Mi-Box / Mi-Plugins）的 V2 核�
 
 ## 定位工作范围
 
-1. 读取目标仓库的 `AGENTS.md`、Git 状态、分支和相关差异。识别 Core 与插件的实际工作树；同级目录可能处于不同分支，不能仅凭目录名假定配套。
+1. 读取目标仓库的 Git 状态、分支和相关差异。识别 Core 与插件的实际工作树；同级目录可能处于不同分支，不能仅凭目录名假定配套。
 2. 找到 Core 的 `src/v2/sdk.ts`、`src/v2/runtime.ts`、`package.json` 和插件的 `<id>/v2.ts`。目录可能名为 `TeleBox-Core` / `TeleBox-Plugins` 或 `mibot` / `mibot-plugins`，不硬编码本机路径。
 3. 确认行为的唯一所有者，再选择修改点。先读 [架构与依赖边界](references/architecture.md)；编写插件或命令时再读 [插件开发](references/plugin-development.md)；选取验证与交付步骤时读 [验证与交付](references/verification.md)。
 
@@ -29,4 +29,4 @@ description: 开发、修复或评审 MiBot（Mi-Box / Mi-Plugins）的 V2 核�
 
 根据改动选择验证：纯逻辑测输入输出，协议问题测真实序列化，资源问题测取消和卸载，共享契约测跨仓兼容。报告实现结果、实际检查及其局限；代码推送、服务部署和真实 Telegram 验证是不同结果。
 
-版本递增和提交推送遵循当前项目 `AGENTS.md` 与会话授权。Skill 本身不新增外部提交、账号操作、发布或部署授权。
+版本递增遵循 [验证与交付](references/verification.md) 的约定与会话授权。Skill 本身不新增外部提交、账号操作、发布或部署授权。
