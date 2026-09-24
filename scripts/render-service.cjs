@@ -43,7 +43,10 @@ if (require.main === module) {
   try {
     const args = process.argv.slice(2);
     const usage = 'Usage: node scripts/render-service.cjs OUTPUT_DIRECTORY [--root DIRECTORY]';
-    if (args.length === 1 && args[0] === '--help') { console.log(usage); process.exit(0); }
+    if (args.length === 1 && args[0] === '--help') {
+      console.log(usage);
+      process.exit(0);
+    }
     const output = args.shift();
     if (!output || output.startsWith('--')) throw new Error(usage);
     let project = path.resolve(__dirname, '..');
@@ -59,7 +62,10 @@ if (require.main === module) {
     const units = renderUnits({root, node: process.execPath});
     fs.mkdirSync(output, {recursive: true});
     for (const [name, content] of Object.entries(units)) fs.writeFileSync(path.join(output, name), content, {mode: 0o600});
-  } catch (error) {console.error(error.message); process.exitCode = 1;}
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }
 
 module.exports = {renderUnits};

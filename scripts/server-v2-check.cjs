@@ -153,7 +153,10 @@ async function live(root) {
   const checks = [];
   const samples = [];
   let stage = 'connect', host, me, detach, failure = false;
-  const mark = name => {checks.push(name); console.log(JSON.stringify({stage: name, result: 'ok'}));};
+  const mark = name => {
+    checks.push(name);
+    console.log(JSON.stringify({stage: name, result: 'ok'}));
+  };
   const shutdown = {};
   try {
     compatibility = installProtocolCompatibility(client);
@@ -268,7 +271,10 @@ async function live(root) {
     stage = 'idle-observation';
     const before = process.cpuUsage();
     const started = Date.now();
-    for (let i = 0; i < 5; i++) {await delay(3000); samples.push(memory());}
+    for (let i = 0; i < 5; i++) {
+      await delay(3000);
+      samples.push(memory());
+    }
     const cpu = process.cpuUsage(before);
     console.log(JSON.stringify({stage, elapsedMs: Date.now() - started, cpuMicroseconds: cpu.user + cpu.system, samples}));
     mark('idle-observation');
@@ -277,7 +283,10 @@ async function live(root) {
     console.log(JSON.stringify({stage, result: 'failed', diagnostic: diagnostic(error)}));
   } finally {
     stage = 'cleanup';
-    try {if (detach) await detach(); shutdown.events = await eventScope.drain(5000);} catch {failure = true;}
+    try {
+      if (detach) await detach();
+      shutdown.events = await eventScope.drain(5000);
+    } catch {failure = true;}
     try {if (host) shutdown.host = await host.shutdown(10000);} catch {failure = true;}
     if (shutdown.host?.completed) for (const artifact of artifacts) artifact.release();
     try {
@@ -287,11 +296,21 @@ async function live(root) {
         const remaining = await client.getMessages(me, {ids: [...ids]});
         shutdown.testMessagesDeleted = !remaining.some(item => item?.className === 'Message');
       } else shutdown.testMessagesDeleted = ids.size === 0;
-    } catch {failure = true; shutdown.testMessagesDeleted = false;}
+    } catch {
+      failure = true;
+      shutdown.testMessagesDeleted = false;
+    }
     try {shutdown.transport = await transportScope.drain(5000);} catch {failure = true;}
     try {shutdown.logging = await loggerScope.drain(5000);} catch {failure = true;}
-    try {await client.destroy(); shutdown.clientDestroyed = true;} catch {failure = true;}
-    try {compatibility?.cleanup(); await releaseLock(); shutdown.accountLockReleased = true;} catch {failure = true;}
+    try {
+      await client.destroy();
+      shutdown.clientDestroyed = true;
+    } catch {failure = true;}
+    try {
+      compatibility?.cleanup();
+      await releaseLock();
+      shutdown.accountLockReleased = true;
+    } catch {failure = true;}
   }
   const compilerResident = Object.keys(require.cache).some(file => /[/\\]node_modules[/\\](esbuild|typescript|tsx)[/\\]/.test(file));
   if (compilerResident || !shutdown.host?.completed || !shutdown.events?.completed ||

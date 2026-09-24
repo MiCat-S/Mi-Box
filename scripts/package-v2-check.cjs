@@ -33,6 +33,9 @@ function packageCheck() {
 }
 if (require.main === module) {
   try {console.log(JSON.stringify(packageCheck()));}
-  catch {console.error('Validation archive packaging failed'); process.exitCode = 1;}
+  catch {
+    console.error('Validation archive packaging failed');
+    process.exitCode = 1;
+  }
 }
 module.exports = {packageCheck};

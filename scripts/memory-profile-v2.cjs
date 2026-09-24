@@ -16,7 +16,10 @@ const memory = () => ({...process.memoryUsage(), maxRSSKiB: process.resourceUsag
 
 async function collect() {
   // WeakRef targets remain alive for their current JS job. Collect on later turns.
-  for (let i = 0; i < 8; i++) { await turn(); global.gc(); }
+  for (let i = 0; i < 8; i++) {
+    await turn();
+    global.gc();
+  }
 }
 
 async function executor() {
@@ -27,7 +30,10 @@ async function executor() {
   async function submitPayload() {
     const payload = Buffer.alloc(16 * 1024 * 1024, 7);
     references.push(new WeakRef(payload));
-    await queue.submit('message', () => { assert.equal(payload[0], 7); keepTimer(); });
+    await queue.submit('message', () => {
+      assert.equal(payload[0], 7);
+      keepTimer();
+    });
   }
   await collect();
   const before = memory();
@@ -158,4 +164,7 @@ async function main() {
   console.log(JSON.stringify({workload, node: process.version, platform: process.platform, ...await run()}));
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1; });
+main().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -17,7 +17,10 @@ const memory = () => ({...process.memoryUsage(), maxRSSKiB: process.resourceUsag
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function collect() {
-  for (let i = 0; i < 3; i++) {await turn(); global.gc();}
+  for (let i = 0; i < 3; i++) {
+    await turn();
+    global.gc();
+  }
 }
 function tree(root) {
   const result = spawnSync('/bin/ps', ['-axo', 'pid=,ppid=,rss='], {encoding: 'utf8'});
@@ -28,7 +31,10 @@ function tree(root) {
   });
   const ids = new Set([root]);
   let size;
-  do {size = ids.size; for (const row of entries) if (ids.has(row.parent)) ids.add(row.pid);} while (size !== ids.size);
+  do {
+    size = ids.size;
+    for (const row of entries) if (ids.has(row.parent)) ids.add(row.pid);
+  } while (size !== ids.size);
   const selected = entries.filter(row => ids.has(row.pid));
   let pssKiB = process.platform === 'linux' ? 0 : null;
   for (const row of selected) {
@@ -56,10 +62,21 @@ async function render() {
 
 function resume(signal) {
   return new Promise((resolve, reject) => {
-    const cleanup = () => {process.off('message', onMessage); signal.removeEventListener('abort', onAbort);};
-    const onMessage = message => {if (message !== 'go') return; cleanup(); resolve();};
-    const onAbort = () => {cleanup(); reject(new Error('Profile cancelled'));};
-    process.on('message', onMessage); signal.addEventListener('abort', onAbort, {once: true});
+    const cleanup = () => {
+      process.off('message', onMessage);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onMessage = message => {
+      if (message !== 'go') return;
+      cleanup();
+      resolve();
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('Profile cancelled'));
+    };
+    process.on('message', onMessage);
+    signal.addEventListener('abort', onAbort, {once: true});
     if (signal.aborted) onAbort();
   });
 }
@@ -72,7 +89,8 @@ async function worker() {
   const scope = new ResourceScope();
   const processes = new ScopedProcesses(scope, {timeoutMs: 60_000, maxOutputBytes: 65536});
   const stop = () => scope.abort();
-  process.on('SIGTERM', stop); process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
   const counts = new Map();
   for (let i = 0; i < 220; i++) {
     cloud.collectWords(`engine${i} engine${i} engine${i} benchmark${i % 19}`, counts);
@@ -121,7 +139,8 @@ async function worker() {
     await scope.drain();
     throw error;
   } finally {
-    process.off('SIGTERM', stop); process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+    process.off('SIGINT', stop);
     process.disconnect();
   }
 }
@@ -131,7 +150,8 @@ function measure(mode, artifact, directory, runs, interval) {
     const child = fork(__filename, ['--worker', mode, artifact, directory, String(runs)],
       {execArgv: ['--expose-gc'], stdio: ['ignore', 'ignore', 'pipe', 'ipc']});
     const stop = () => child.kill('SIGTERM');
-    process.on('SIGTERM', stop); process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+    process.on('SIGINT', stop);
     let stderr = '', result, timer, samplingError;
     let samples = 0, maxGapMs = 0, last = performance.now();
     const peaks = {rssKiB: 0, pssKiB: null, processes: 0};
@@ -139,26 +159,35 @@ function measure(mode, artifact, directory, runs, interval) {
     const sample = () => {
       try {
         const now = performance.now();
-        maxGapMs = Math.max(maxGapMs, now - last); last = now;
-        const value = tree(child.pid); samples++;
+        maxGapMs = Math.max(maxGapMs, now - last);
+        last = now;
+        const value = tree(child.pid);
+        samples++;
         peaks.rssKiB = Math.max(peaks.rssKiB, value.rssKiB);
         if (value.pssKiB !== null) peaks.pssKiB = Math.max(peaks.pssKiB ?? 0, value.pssKiB);
         peaks.processes = Math.max(peaks.processes, value.processes);
         return value;
-      } catch (error) {samplingError = error; child.kill();}
+      } catch (error) {
+        samplingError = error;
+        child.kill();
+      }
     };
     child.stderr.on('data', chunk => {stderr = (stderr + chunk).slice(-65536);});
     child.on('error', reject);
     child.on('message', message => {
       if (message.phase === 'ready') {
-        sample(); timer = setInterval(sample, interval); child.send('go');
+        sample();
+        timer = setInterval(sample, interval);
+        child.send('go');
       } else if (message.phase === 'idle') {
-        idle.push(sample()); child.send('go');
+        idle.push(sample());
+        child.send('go');
       } else if (message.phase === 'done') result = message.result;
     });
     child.on('exit', (code, signal) => {
       clearInterval(timer);
-      process.off('SIGTERM', stop); process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+      process.off('SIGINT', stop);
       if (samplingError) reject(samplingError);
       else if (code !== 0 || signal || !result) reject(new Error(`Profile ${mode} failed (${code ?? signal}): ${stderr}`));
       else resolve({...result, sampledTreePeak: peaks, idleTrees: idle, samples, maxSampleGapMs: maxGapMs, stderr});
@@ -211,4 +240,7 @@ async function main() {
     process.stdout.write(text);
   } finally {await fs.rm(directory, {recursive: true, force: true});}
 }
-main().catch(error => {console.error(error); process.exitCode = 1;});
+main().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

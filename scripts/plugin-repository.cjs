@@ -113,6 +113,9 @@ function run(action, ...targets) {
 }
 if (require.main === module) {
   try {console.log(JSON.stringify(run(...process.argv.slice(2))));}
-  catch (error) {console.error(error.message); process.exitCode = 1;}
+  catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }
 module.exports = {run};
