@@ -6,7 +6,11 @@ import path from "node:path";
 import {PluginHost} from "../host";
 import createExec from "./exec";
 
-const NODE = "/tmp/node24-download/node-v24.21.0-darwin-arm64/bin/node";
+// The interpreter under test is the one running the suite. A hardcoded path
+// ties these cases to one machine's Node installation, and they fail with a
+// spawn error the moment that directory goes away.
+const NODE = process.execPath;
+assert.doesNotMatch(NODE, /\s/, "exec builds command lines by splitting on whitespace; a spaced interpreter path needs quoting");
 
 async function fixture(t: test.TestContext, options: {prefixes?: string[]; aliases?: Record<string, string>} = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "mibot-exec-"));
