@@ -15,6 +15,23 @@ import {renderCommandHelp, type HelpSection} from "../commands";
 
 const htmlOptions = {parseMode: "html", linkPreview: false} as const;
 type Candidate = {id: string; revision?: string; error?: string; ids?: readonly string[]};
+type Mutation = "install" | "update" | "remove";
+type Stage = (value: string) => void;
+/** What scripts/plugin-repository.cjs prints for search, single builds and batch builds. */
+type RepositoryOutput = {
+  ids?: string[];
+  collisions?: string[][];
+  descriptions?: Record<string, string>;
+  descriptionsAvailable?: boolean;
+  id?: string;
+  revision?: string;
+  error?: string;
+  candidates?: Candidate[];
+  head?: string;
+};
+const MUTATION_VERBS: Record<Mutation, string> = {install: "安装", update: "更新", remove: "卸载"};
+/** A replied plugin file is refused above this size, both up front and while downloading. */
+const LOCAL_PLUGIN_LIMIT = 2 * 1024 * 1024;
 export interface TpmSuccessfulUpdateTrigger {
   readonly id: string;
   readonly source: "manual" | "automatic";
@@ -70,6 +87,31 @@ const autoCheckIntervalMs = 10 * 60 * 1000;
 
 function descriptionFor(descriptions: Readonly<Record<string, string>>, id: string): string {
   return Object.hasOwn(descriptions, id) && typeof descriptions[id] === "string" ? descriptions[id] : "";
+}
+
+/** Maps a repository candidate's error onto the code reported for it. */
+function candidateFailureCode(candidate: Candidate): string {
+  if (candidate.error === "AMBIGUOUS") return "AMBIGUOUS";
+  if (candidate.error === "NOT_FOUND" || candidate.error === "NOT_AVAILABLE") return "NOT_AVAILABLE";
+  return "BUILD";
+}
+
+function batchProgressTitle(all: boolean, action: Mutation): string {
+  if (!all) return action === "remove" ? "正在卸载所选扩展…" : "正在下载并构建所选扩展…";
+  if (action === "remove") return "正在卸载全部已安装扩展…";
+  if (action === "update") return "正在下载并构建已安装扩展…";
+  return "正在下载并构建全部可安装扩展…";
+}
+
+/** Resolves removal targets against the installed ids, one candidate per plugin. */
+function removalCandidates(targets: readonly string[], installedIds: readonly string[]): Candidate[] {
+  const byId = new Map<string, Candidate>();
+  for (const value of targets) {
+    const resolved = resolvePluginId(value, installedIds);
+    const candidate: Candidate = "error" in resolved ? {id: value, ...resolved} : {id: resolved.id};
+    byId.set(candidate.id, candidate);
+  }
+  return [...byId.values()];
 }
 
 function errorCode(error: unknown): string {
@@ -175,7 +217,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
   const repository = async (ctx: PluginContext, action: string, ...ids: string[]) => {
     const result = await ctx.processes.run(process.execPath, [path.join(root, "scripts/plugin-repository.cjs"), action, ...ids],
       {timeoutMs: ["build-all", "build-selected"].includes(action) ? 180000 : 30000, maxOutputBytes: 65536});
-    return JSON.parse(result.stdout.toString("utf8")) as {ids?: string[]; collisions?: string[][]; descriptions?: Record<string, string>; descriptionsAvailable?: boolean; id?: string; revision?: string; error?: string; candidates?: Candidate[]; head?: string};
+    return JSON.parse(result.stdout.toString("utf8")) as RepositoryOutput;
   };
 
   const authorizeOwner = async (invocation: CommandInvocation, ctx: PluginContext): Promise<boolean> => {
@@ -223,8 +265,6 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     signal.throwIfAborted();
   };
 
-  const autoFailureCode = (candidate: Candidate): string => candidate.error === "AMBIGUOUS" ? "AMBIGUOUS"
-    : candidate.error === "NOT_FOUND" || candidate.error === "NOT_AVAILABLE" ? "NOT_AVAILABLE" : "BUILD";
   const clearInFlight = (batch: AutoBatch): AutoBatch => {
     const {inFlight: _inFlight, ...rest} = batch;
     return rest;
@@ -406,7 +446,7 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         }
         if (candidate.error || !candidate.revision) {
           await patchBatch(ctx, batch.trigger.id, value => ({
-            ...clearInFlight(value), failed: [...value.failed, {id: candidate.id, code: autoFailureCode(candidate)}],
+            ...clearInFlight(value), failed: [...value.failed, {id: candidate.id, code: candidateFailureCode(candidate)}],
           }));
           continue;
         }
@@ -537,57 +577,246 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
     });
   };
 
-  const mutate = async (invocation: CommandInvocation, ctx: PluginContext, action: "install" | "update" | "remove"): Promise<void> => {
+  // Resolve default modules locally before touching the repository so a
+  // builtin such as help never triggers a network build attempt.
+  const defaultModuleFor = (input: string): string | undefined => {
+    if (host.pluginState(input)) return input;
+    const matches = host.listPlugins().map(plugin => plugin.id).filter(name => name.toLowerCase() === input.toLowerCase());
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+
+  /** `.tpm i` as a reply to a single-file plugin: download, build and activate it. */
+  const installFromReply = async (invocation: CommandInvocation, ctx: PluginContext, stage: Stage): Promise<void> => {
+      stage("local");
+      const reply = await ctx.telegram.getReply(invocation.message);
+      const raw = reply?.raw as Api.Message | undefined;
+      const document = raw?.document;
+      const filename = document?.attributes.find(attribute => attribute instanceof Api.DocumentAttributeFilename);
+      const name = filename instanceof Api.DocumentAttributeFilename ? filename.fileName : "";
+      const localId = name.endsWith(".ts") ? name.slice(0, -3) : "";
+      if (!raw || !document || !isPluginId(localId)) {
+        await ctx.telegram.edit(invocation.message, "请回复一个以插件 ID 命名的 V2 单文件插件（例如 demo.ts），再执行 tpm i。旧版插件须先迁移至 V2。");
+        return;
+      }
+      if (BigInt(document.size.toString()) > BigInt(LOCAL_PLUGIN_LIMIT)) {
+        await ctx.telegram.edit(invocation.message, "本地插件文件不能超过 2 MiB");
+        return;
+      }
+      if (host.pluginState(localId) && !releases.snapshot().generations.some(item => item.id === localId)) {
+        await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
+        return;
+      }
+      await ctx.files.withTemp(async (directory, signal) => {
+        const bytes = await ctx.telegram.withClient(async (client, clientSignal) => {
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const chunk of client.iterDownload(raw, {requestSize: 65536})) {
+            signal.throwIfAborted();
+            clientSignal.throwIfAborted();
+            size += chunk.length;
+            if (size > LOCAL_PLUGIN_LIMIT) throw Object.assign(new Error("Local plugin exceeds limit"), {code: "LIMIT"});
+            chunks.push(Buffer.from(chunk));
+          }
+          return Buffer.concat(chunks);
+        });
+        signal.throwIfAborted();
+        await writeFile(path.join(directory, name), bytes, {flag: "wx", mode: 0o600, signal});
+        stage("build");
+        const result = await ctx.processes.run(process.execPath,
+          [path.join(root, "scripts/build-v2-plugin.cjs"), localId, directory, name],
+          {timeoutMs: 30000, maxOutputBytes: 65536});
+        const candidate = JSON.parse(result.stdout.toString("utf8"));
+        if (candidate.manifest?.id !== localId || !revisionPattern.test(candidate.manifest?.revision ?? "")) throw new Error("Invalid local artifact");
+        signal.throwIfAborted();
+        stage("activate");
+        await releases.activate(localId, candidate.manifest.revision);
+      });
+      await ctx.telegram.edit(invocation.message, `本地插件 ${localId} 已安装并加载。仅支持 V2 单文件插件；同名仓库插件的手动或自动更新可能替换此版本。`);
+  };
+
+  /** The candidates a batch works through. Removals and empty selections never touch the repository. */
+  const batchCandidates = async (ctx: PluginContext, action: Mutation, all: boolean, targets: string[],
+    installedIds: string[], excluded: ReadonlySet<string>): Promise<RepositoryOutput> => {
+    if (action === "remove") return {ids: installedIds, candidates: removalCandidates(targets, installedIds)};
+    if (!all && !targets.length) return {ids: [], candidates: []};
+    if (action === "update" || !all) return repository(ctx, "build-selected", ...targets);
+    return repository(ctx, "build-all", ...excluded);
+  };
+
+  /** `.tpm i|up|rm` with several names or `all`: one repository call, then each candidate in turn. */
+  const mutateBatch = async (invocation: CommandInvocation, ctx: PluginContext, action: Mutation,
+    requested: string[], installedIds: string[], stage: Stage): Promise<void> => {
+    const all = requested[0] === "all";
+    const updating = action === "update";
+    const removing = action === "remove";
+    const verb = MUTATION_VERBS[action];
+    const defaults = new Set<string>();
+    const targets = all ? [...new Set(installedIds)].sort() : requested.filter(value => {
+      const local = defaultModuleFor(value);
+      if (local && !installedIds.includes(local)) {
+        defaults.add(local);
+        return false;
+      }
+      return true;
+    });
+    if (all && (updating || removing) && !targets.length) {
+      await ctx.telegram.edit(invocation.message, "没有已安装的扩展插件", htmlOptions);
+      return;
+    }
+    await ctx.telegram.edit(invocation.message,
+      renderFeedback({state: "working", title: batchProgressTitle(all, action)}), htmlOptions);
+    const excluded = new Set(host.listPlugins().map(plugin => plugin.id).filter(isPluginId));
+    const result = await batchCandidates(ctx, action, all, targets, installedIds, excluded);
+    if (!Array.isArray(result.ids) || !Array.isArray(result.candidates) ||
+        result.ids.some(value => typeof value !== "string" || !isPluginId(value)) ||
+        result.candidates.some(value => !value || typeof value.id !== "string" || !isPluginId(value.id))) {
+      throw new Error("Invalid candidates");
+    }
+    if (all && updating && (result.candidates.length !== targets.length ||
+        new Set(result.candidates.map(item => item.id)).size !== targets.length ||
+        result.candidates.some(item => !targets.includes(item.id)))) throw new Error("Invalid update candidates");
+    if (!all) {
+      const expected = new Set(targets.map(value => {
+        const resolved = resolvePluginId(value, result.ids!);
+        return "error" in resolved ? value : resolved.id;
+      }));
+      if (result.candidates.length !== expected.size || new Set(result.candidates.map(item => item.id)).size !== expected.size ||
+          result.candidates.some(item => !expected.has(item.id))) throw new Error("Invalid selected candidates");
+    }
+    stage(removing ? "unload" : "activate");
+    const completedIds: string[] = [];
+    const skipped = new Set(all && !updating && !removing ? result.ids.filter(value => excluded.has(value)) : defaults);
+    const unchanged = new Set<string>();
+    const failed: {id: string; code: string}[] = [];
+    for (const [index, candidate] of result.candidates.entries()) {
+      ctx.signal.throwIfAborted();
+      if (all && !updating && !removing && host.pluginState(candidate.id)) {
+        skipped.add(candidate.id);
+        continue;
+      }
+      let failure: string | undefined;
+        if (candidate.error || !removing && !candidate.revision) {
+          failure = candidateFailureCode(candidate);
+        }
+      else {
+        try {
+          if (removing) await releases.remove(candidate.id);
+          else if (updating && releases.snapshot().generations.some(item => item.id === candidate.id &&
+              item.state === "active" && item.revision === candidate.revision)) unchanged.add(candidate.id);
+          else await releases.activate(candidate.id, candidate.revision!);
+          if (!updating || !unchanged.has(candidate.id)) completedIds.push(candidate.id);
+        }
+        catch (error) {
+          ctx.signal.throwIfAborted();
+          failure = errorCode(error);
+        }
+      }
+      if (failure) {
+        failed.push({id: candidate.id, code: failure});
+        ctx.log.error("tpm.batch_failed", {id: candidate.id, code: failure});
+      }
+      if ((index + 1) % 10 === 0) await ctx.telegram.edit(invocation.message, renderFeedback({
+        state: "working", title: `正在${verb}扩展 ${index + 1}/${result.candidates.length}`,
+        detail: `成功 ${completedIds.length} · 失败 ${failed.length}`,
+      }), htmlOptions);
+    }
+    // Only groups actually blocked in this batch are reported as blocked;
+    // repository collisions that did not block anything stay a warning.
+    const groupKey = (group: readonly string[]): string => group.join("\u0000");
+    const blockedGroups = [...new Map((result.candidates ?? [])
+      .filter(item => item.error === "AMBIGUOUS" && Array.isArray(item.ids) && item.ids.length > 1)
+      .map(item => [groupKey(item.ids!), item.ids!])).values()];
+    const repoGroups = (result.collisions ?? []).filter(group => Array.isArray(group) && group.length > 1);
+    const collisionNotice = blockedGroups.length
+      ? `本次已阻止大小写冲突组：${blockedGroups.map(group => group.join(" / ")).join("；")}`
+      : repoGroups.length
+        ? `仓库存在大小写冲突组：${repoGroups.map(group => group.join(" / ")).join("；")}（精确单项仍可安装）`
+        : undefined;
+    const output = await renderDocument({
+      title: `${getBotName()} 插件批量${verb}完成`,
+      subtitle: updating
+        ? `已更新 ${completedIds.length} · 保持最新 ${unchanged.size} · 失败 ${failed.length}`
+        : `成功 ${completedIds.length} · 跳过 ${skipped.size} · 失败 ${failed.length}`,
+      sections: [
+        ...(failed.length ? [section(`${verb}失败`, failed.map(item => concat(code(item.id), text(` · ${item.code}`))))] : []),
+        ...(completedIds.length ? [section(`已${verb} · ${completedIds.length}`, await compactList(completedIds))] : []),
+        ...(unchanged.size ? [section(`保持最新 · ${unchanged.size}`, await compactList([...unchanged]))] : []),
+        ...(skipped.size ? [section(`${all ? "已安装或默认模块" : "默认模块"} · ${skipped.size}`, await compactList([...skipped]))] : []),
+      ],
+      footer: [...(removing ? [text("插件配置数据已保留")] : []),
+        ...(collisionNotice ? [text(collisionNotice)] : []),
+        concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
+    }, PAGE_LABEL_RESERVE);
+    for (const [index, page] of output.entries()) {
+      ctx.signal.throwIfAborted();
+      const labelled = page + pageLabel(index, output.length);
+      if (!index) await ctx.telegram.edit(invocation.message, labelled, htmlOptions);
+      else await ctx.telegram.reply(invocation.message, labelled, htmlOptions);
+    }
+  };
+
+  /** `.tpm i|up|rm <name>` for exactly one plugin. */
+  const mutateOne = async (invocation: CommandInvocation, ctx: PluginContext, action: Mutation,
+    id: string, installedIds: string[], stage: Stage): Promise<void> => {
+    const localDefault = defaultModuleFor(id);
+    if (localDefault && !installedIds.includes(localDefault)) {
+      await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
+      return;
+    }
+    if (action === "remove") {
+      const resolved = resolvePluginId(id, installedIds);
+      if ("error" in resolved) {
+        await ctx.telegram.edit(invocation.message, resolved.error === "AMBIGUOUS"
+          ? `插件名 ${id} 存在大小写冲突：${resolved.ids.join("、")}；请使用完整名称`
+          : `未安装扩展 ${id}`);
+        return;
+      }
+      const canonical = resolved.id;
+      stage("unload");
+      await releases.remove(canonical);
+      await ctx.telegram.edit(invocation.message, renderFeedback({
+        state: "success", title: "卸载完成", detail: `${canonical} · 配置数据已保留`,
+      }), htmlOptions);
+    } else {
+      await ctx.telegram.edit(invocation.message,
+        renderFeedback({state: "working", title: `正在下载并构建 ${id}…`}), htmlOptions);
+      const candidate = await repository(ctx, "build", id);
+      if (candidate.error === "AMBIGUOUS") {
+        await ctx.telegram.edit(invocation.message,
+          `插件名 ${id} 存在大小写冲突：${(candidate.ids ?? []).join("、")}；请使用完整名称`);
+        return;
+      }
+      if (candidate.error === "NOT_FOUND") {
+        await ctx.telegram.edit(invocation.message, `插件 ${id} 不存在或不可用`);
+        return;
+      }
+      const canonical = candidate.id;
+      if (!canonical || !isPluginId(canonical) || !candidate.revision) throw new Error("Invalid candidate");
+      const installed = installedIds.includes(canonical);
+      if (host.pluginState(canonical) && !installed) {
+        await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
+        return;
+      }
+      const current = releases.snapshot().generations.find(item => item.id === canonical && item.state === "active");
+      if (action === "update" && current?.revision === candidate.revision) {
+        await ctx.telegram.edit(invocation.message, renderFeedback({
+          state: "success", title: "保持最新", detail: `${canonical} · 无需更新`,
+        }), htmlOptions);
+        return;
+      }
+      stage("activate");
+      await releases.activate(canonical, candidate.revision);
+      await ctx.telegram.edit(invocation.message, renderFeedback({
+        state: "success", title: `${installed ? "更新" : "安装"}完成`, detail: `${canonical} · 已加载`,
+      }), htmlOptions);
+    }
+  };
+
+  const mutate = async (invocation: CommandInvocation, ctx: PluginContext, action: Mutation): Promise<void> => {
     const requested = [...new Set(invocation.args)];
-    const id = requested[0]!;
     await exclusive(ctx, invocation, async stage => {
       if (action === "install" && !requested.length) {
-        stage("local");
-        const reply = await ctx.telegram.getReply(invocation.message);
-        const raw = reply?.raw as Api.Message | undefined;
-        const document = raw?.document;
-        const filename = document?.attributes.find(attribute => attribute instanceof Api.DocumentAttributeFilename);
-        const name = filename instanceof Api.DocumentAttributeFilename ? filename.fileName : "";
-        const localId = name.endsWith(".ts") ? name.slice(0, -3) : "";
-        if (!raw || !document || !isPluginId(localId)) {
-          await ctx.telegram.edit(invocation.message, "请回复一个以插件 ID 命名的 V2 单文件插件（例如 demo.ts），再执行 tpm i。旧版插件须先迁移至 V2。");
-          return;
-        }
-        const limit = 2 * 1024 * 1024;
-        if (BigInt(document.size.toString()) > BigInt(limit)) {
-          await ctx.telegram.edit(invocation.message, "本地插件文件不能超过 2 MiB");
-          return;
-        }
-        if (host.pluginState(localId) && !releases.snapshot().generations.some(item => item.id === localId)) {
-          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
-          return;
-        }
-        await ctx.files.withTemp(async (directory, signal) => {
-          const bytes = await ctx.telegram.withClient(async (client, clientSignal) => {
-            const chunks: Buffer[] = [];
-            let size = 0;
-            for await (const chunk of client.iterDownload(raw, {requestSize: 65536})) {
-              signal.throwIfAborted();
-              clientSignal.throwIfAborted();
-              size += chunk.length;
-              if (size > limit) throw Object.assign(new Error("Local plugin exceeds limit"), {code: "LIMIT"});
-              chunks.push(Buffer.from(chunk));
-            }
-            return Buffer.concat(chunks);
-          });
-          signal.throwIfAborted();
-          await writeFile(path.join(directory, name), bytes, {flag: "wx", mode: 0o600, signal});
-          stage("build");
-          const result = await ctx.processes.run(process.execPath,
-            [path.join(root, "scripts/build-v2-plugin.cjs"), localId, directory, name],
-            {timeoutMs: 30000, maxOutputBytes: 65536});
-          const candidate = JSON.parse(result.stdout.toString("utf8"));
-          if (candidate.manifest?.id !== localId || !revisionPattern.test(candidate.manifest?.revision ?? "")) throw new Error("Invalid local artifact");
-          signal.throwIfAborted();
-          stage("activate");
-          await releases.activate(localId, candidate.manifest.revision);
-        });
-        await ctx.telegram.edit(invocation.message, `本地插件 ${localId} 已安装并加载。仅支持 V2 单文件插件；同名仓库插件的手动或自动更新可能替换此版本。`);
+        await installFromReply(invocation, ctx, stage);
         return;
       }
       if (!requested.length || requested.some(value => !isPluginId(value)) || requested.includes("all") && requested.length > 1) {
@@ -595,184 +824,8 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         return;
       }
       const installedIds = releases.snapshot().generations.map(item => item.id);
-      const defaultIds = host.listPlugins().map(plugin => plugin.id);
-      // Resolve default modules locally before touching the repository so a
-      // builtin such as help never triggers a network build attempt.
-      const defaultFor = (input: string): string | undefined => {
-        if (host.pluginState(input)) return input;
-        const matches = defaultIds.filter(name => name.toLowerCase() === input.toLowerCase());
-        return matches.length === 1 ? matches[0] : undefined;
-      };
-      if (id === "all" || requested.length > 1) {
-        const all = id === "all";
-        const updating = action === "update";
-        const removing = action === "remove";
-        const verb = removing ? "卸载" : updating ? "更新" : "安装";
-        const defaults = new Set<string>();
-        const targets = all ? [...new Set(installedIds)].sort() : requested.filter(value => {
-          const local = defaultFor(value);
-          if (local && !installedIds.includes(local)) {
-            defaults.add(local);
-            return false;
-          }
-          return true;
-        });
-        if (all && (updating || removing) && !targets.length) {
-          await ctx.telegram.edit(invocation.message, "没有已安装的扩展插件", htmlOptions);
-          return;
-        }
-        await ctx.telegram.edit(invocation.message,
-          renderFeedback({state: "working", title: !all ? `正在${removing ? "卸载" : "下载并构建"}所选扩展…` : removing ? "正在卸载全部已安装扩展…" : updating ? "正在下载并构建已安装扩展…" : "正在下载并构建全部可安装扩展…"}), htmlOptions);
-        const excluded = new Set(host.listPlugins().map(plugin => plugin.id).filter(isPluginId));
-        const result = removing ? {ids: installedIds, candidates: [...new Map(targets.map(value => {
-          const resolved = resolvePluginId(value, installedIds);
-          const candidate: Candidate = "error" in resolved ? {id: value, ...resolved} : {id: resolved.id};
-          return [candidate.id, candidate] as const;
-        })).values()]}
-          : !all && !targets.length ? {ids: [], candidates: []}
-          : updating || !all ? await repository(ctx, "build-selected", ...targets)
-          : await repository(ctx, "build-all", ...excluded);
-        if (!Array.isArray(result.ids) || !Array.isArray(result.candidates) ||
-            result.ids.some(value => typeof value !== "string" || !isPluginId(value)) ||
-            result.candidates.some(value => !value || typeof value.id !== "string" || !isPluginId(value.id))) {
-          throw new Error("Invalid candidates");
-        }
-        if (all && updating && (result.candidates.length !== targets.length ||
-            new Set(result.candidates.map(item => item.id)).size !== targets.length ||
-            result.candidates.some(item => !targets.includes(item.id)))) throw new Error("Invalid update candidates");
-        if (!all) {
-          const expected = new Set(targets.map(value => {
-            const resolved = resolvePluginId(value, result.ids!);
-            return "error" in resolved ? value : resolved.id;
-          }));
-          if (result.candidates.length !== expected.size || new Set(result.candidates.map(item => item.id)).size !== expected.size ||
-              result.candidates.some(item => !expected.has(item.id))) throw new Error("Invalid selected candidates");
-        }
-        stage(removing ? "unload" : "activate");
-        const completedIds: string[] = [];
-        const skipped = new Set(all && !updating && !removing ? result.ids.filter(value => excluded.has(value)) : defaults);
-        const unchanged = new Set<string>();
-        const failed: {id: string; code: string}[] = [];
-        for (const [index, candidate] of result.candidates.entries()) {
-          ctx.signal.throwIfAborted();
-          if (all && !updating && !removing && host.pluginState(candidate.id)) {
-            skipped.add(candidate.id);
-            continue;
-          }
-          let failure: string | undefined;
-          if (candidate.error || !removing && !candidate.revision) {
-            failure = candidate.error === "AMBIGUOUS" ? "AMBIGUOUS"
-              : candidate.error === "NOT_FOUND" || candidate.error === "NOT_AVAILABLE" ? "NOT_AVAILABLE" : "BUILD";
-          }
-          else {
-            try {
-              if (removing) await releases.remove(candidate.id);
-              else if (updating && releases.snapshot().generations.some(item => item.id === candidate.id &&
-                  item.state === "active" && item.revision === candidate.revision)) unchanged.add(candidate.id);
-              else await releases.activate(candidate.id, candidate.revision!);
-              if (!updating || !unchanged.has(candidate.id)) completedIds.push(candidate.id);
-            }
-            catch (error) {
-              ctx.signal.throwIfAborted();
-              failure = errorCode(error);
-            }
-          }
-          if (failure) {
-            failed.push({id: candidate.id, code: failure});
-            ctx.log.error("tpm.batch_failed", {id: candidate.id, code: failure});
-          }
-          if ((index + 1) % 10 === 0) await ctx.telegram.edit(invocation.message, renderFeedback({
-            state: "working", title: `正在${verb}扩展 ${index + 1}/${result.candidates.length}`,
-            detail: `成功 ${completedIds.length} · 失败 ${failed.length}`,
-          }), htmlOptions);
-        }
-        // Only groups actually blocked in this batch are reported as blocked;
-        // repository collisions that did not block anything stay a warning.
-        const groupKey = (group: readonly string[]): string => group.join("\u0000");
-        const blockedGroups = [...new Map((result.candidates ?? [])
-          .filter(item => item.error === "AMBIGUOUS" && Array.isArray(item.ids) && item.ids.length > 1)
-          .map(item => [groupKey(item.ids!), item.ids!])).values()];
-        const repoGroups = (result.collisions ?? []).filter(group => Array.isArray(group) && group.length > 1);
-        const collisionNotice = blockedGroups.length
-          ? `本次已阻止大小写冲突组：${blockedGroups.map(group => group.join(" / ")).join("；")}`
-          : repoGroups.length
-            ? `仓库存在大小写冲突组：${repoGroups.map(group => group.join(" / ")).join("；")}（精确单项仍可安装）`
-            : undefined;
-        const output = await renderDocument({
-          title: `${getBotName()} 插件批量${verb}完成`,
-          subtitle: updating
-            ? `已更新 ${completedIds.length} · 保持最新 ${unchanged.size} · 失败 ${failed.length}`
-            : `成功 ${completedIds.length} · 跳过 ${skipped.size} · 失败 ${failed.length}`,
-          sections: [
-            ...(failed.length ? [section(`${verb}失败`, failed.map(item => concat(code(item.id), text(` · ${item.code}`))))] : []),
-            ...(completedIds.length ? [section(`已${verb} · ${completedIds.length}`, await compactList(completedIds))] : []),
-            ...(unchanged.size ? [section(`保持最新 · ${unchanged.size}`, await compactList([...unchanged]))] : []),
-            ...(skipped.size ? [section(`${all ? "已安装或默认模块" : "默认模块"} · ${skipped.size}`, await compactList([...skipped]))] : []),
-          ],
-          footer: [...(removing ? [text("插件配置数据已保留")] : []),
-            ...(collisionNotice ? [text(collisionNotice)] : []),
-            concat(text("查看已安装扩展："), command(invocation.prefix, "tpm", "list"))],
-        }, PAGE_LABEL_RESERVE);
-        for (const [index, page] of output.entries()) {
-          ctx.signal.throwIfAborted();
-          const labelled = page + pageLabel(index, output.length);
-          if (!index) await ctx.telegram.edit(invocation.message, labelled, htmlOptions);
-          else await ctx.telegram.reply(invocation.message, labelled, htmlOptions);
-        }
-        return;
-      }
-      const localDefault = defaultFor(id);
-      if (localDefault && !installedIds.includes(localDefault)) {
-        await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
-        return;
-      }
-      if (action === "remove") {
-        const resolved = resolvePluginId(id, installedIds);
-        if ("error" in resolved) {
-          await ctx.telegram.edit(invocation.message, resolved.error === "AMBIGUOUS"
-            ? `插件名 ${id} 存在大小写冲突：${resolved.ids.join("、")}；请使用完整名称`
-            : `未安装扩展 ${id}`);
-          return;
-        }
-        const canonical = resolved.id;
-        stage("unload");
-        await releases.remove(canonical);
-        await ctx.telegram.edit(invocation.message, renderFeedback({
-          state: "success", title: "卸载完成", detail: `${canonical} · 配置数据已保留`,
-        }), htmlOptions);
-      } else {
-        await ctx.telegram.edit(invocation.message,
-          renderFeedback({state: "working", title: `正在下载并构建 ${id}…`}), htmlOptions);
-        const candidate = await repository(ctx, "build", id);
-        if (candidate.error === "AMBIGUOUS") {
-          await ctx.telegram.edit(invocation.message,
-            `插件名 ${id} 存在大小写冲突：${(candidate.ids ?? []).join("、")}；请使用完整名称`);
-          return;
-        }
-        if (candidate.error === "NOT_FOUND") {
-          await ctx.telegram.edit(invocation.message, `插件 ${id} 不存在或不可用`);
-          return;
-        }
-        const canonical = candidate.id;
-        if (!canonical || !isPluginId(canonical) || !candidate.revision) throw new Error("Invalid candidate");
-        const installed = installedIds.includes(canonical);
-        if (host.pluginState(canonical) && !installed) {
-          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
-          return;
-        }
-        const current = releases.snapshot().generations.find(item => item.id === canonical && item.state === "active");
-        if (action === "update" && current?.revision === candidate.revision) {
-          await ctx.telegram.edit(invocation.message, renderFeedback({
-            state: "success", title: "保持最新", detail: `${canonical} · 无需更新`,
-          }), htmlOptions);
-          return;
-        }
-        stage("activate");
-        await releases.activate(canonical, candidate.revision);
-        await ctx.telegram.edit(invocation.message, renderFeedback({
-          state: "success", title: `${installed ? "更新" : "安装"}完成`, detail: `${canonical} · 已加载`,
-        }), htmlOptions);
-      }
+      if (requested[0] === "all" || requested.length > 1) await mutateBatch(invocation, ctx, action, requested, installedIds, stage);
+      else await mutateOne(invocation, ctx, action, requested[0]!, installedIds, stage);
     });
   };
 

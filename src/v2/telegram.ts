@@ -105,22 +105,31 @@ function rawMessage(message: MessageEnvelope): Api.Message | undefined {
 }
 
 /** Frozen scalar snapshot; raw retains the original, mutable protocol object and its methods. */
-export function messageEnvelope(message: Api.Message, options: EnvelopeOptions = {}): MessageEnvelope {
-  const chatId = peerId(message.peerId);
-  const reply = replyHeader(message);
-  const savedPeer = (message as Api.Message & { savedPeerId?: Api.TypePeer }).savedPeerId;
+/**
+ * Who sent a message, as a decimal id. Owner checks and admission depend on
+ * this, so the sources are tried in a fixed order of trust.
+ */
+function resolveSenderId(message: Api.Message, chatId: string, selfId: string | undefined): string | undefined {
   // An outgoing private message always originates from the authenticated account, so an
   // injected selfId is authoritative. Telegram may omit fromId or expose a peer-shaped
   // senderId for own messages; trusting those first would misreport the peer as the
   // operator. This only affects outgoing PeerUser messages: incoming private, broadcast
   // posts and channel send-as keep their existing sender resolution and admission rules.
-  const authenticatedSelf = options.selfId !== undefined && message.out === true &&
-    message.peerId.className === "PeerUser";
-  const senderId = authenticatedSelf ? options.selfId
-    : message.fromId ? peerId(message.fromId)
-    : message.senderId?.toString() ??
-      ((message.post || (!message.out && message.peerId.className === "PeerUser")) ? chatId
-        : message.out ? options.selfId : undefined);
+  if (selfId !== undefined && message.out === true && message.peerId.className === "PeerUser") return selfId;
+  if (message.fromId) return peerId(message.fromId);
+  const decoded = message.senderId?.toString();
+  if (decoded !== undefined) return decoded;
+  // Without any sender field, a channel post and an incoming private message
+  // were sent by the chat itself.
+  if (message.post || (!message.out && message.peerId.className === "PeerUser")) return chatId;
+  return message.out ? selfId : undefined;
+}
+
+export function messageEnvelope(message: Api.Message, options: EnvelopeOptions = {}): MessageEnvelope {
+  const chatId = peerId(message.peerId);
+  const reply = replyHeader(message);
+  const savedPeer = (message as Api.Message & { savedPeerId?: Api.TypePeer }).savedPeerId;
+  const senderId = resolveSenderId(message, chatId, options.selfId);
   return Object.freeze({
     id: message.id,
     chatId,

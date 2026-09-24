@@ -53,7 +53,9 @@ function protocolSink(compatibility: () => ProtocolCompatibility | undefined): (
   return record => {
     const decision: ProtocolLogDecision = compatibility()?.handleLog({message: record.message, error: record.error}) ?? "pass";
     if (decision === "suppress") return;
-    const level = decision === "warn" || record.level === NativeLogLevel.WARN ? "info" : record.level === NativeLogLevel.ERROR ? "error" : "info";
+    // Only a native error that compatibility did not reclassify logs as an
+    // error; warnings and known channel gaps are informational.
+    const level = decision !== "warn" && record.level === NativeLogLevel.ERROR ? "error" : "info";
     logLine(level, decision === "warn" ? "telegram.channel_gap" : "telegram.protocol", {nativeLevel: record.level});
   };
 }
