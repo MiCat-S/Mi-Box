@@ -28,7 +28,8 @@ function report(config: MemoryConfig): string {
     `自动保护: <b>${config.enabled ? "开启" : "关闭"}</b>`;
 }
 function parsePositive(value: string | undefined): number | undefined {
-  const number = Number(value); return Number.isFinite(number) && number > 0 ? number : undefined;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : undefined;
 }
 async function configOf(ctx: PluginContext) {
   return ctx.storage.json<MemoryConfig>("config.json", defaults);
@@ -58,7 +59,8 @@ const setThreshold = async (invocation: CommandInvocation, ctx: PluginContext): 
   const target = invocation.args[0];
   const value = parsePositive(invocation.args[1]);
   if (!value || !["heap", "rss"].includes(target ?? "")) {
-    await ctx.telegram.edit(invocation.message, "用法：.memory set heap|rss 数值"); return;
+    await ctx.telegram.edit(invocation.message, "用法：.memory set heap|rss 数值");
+    return;
   }
   await (await configOf(ctx)).update(current => ({...current, [target!]: value}));
   await ctx.telegram.edit(invocation.message, `已设置 ${target} 上限为 ${value} MB`);
@@ -129,7 +131,9 @@ export default function createMemory() {
     }),
     commands: {memory: memoryCommand},
     jobs: {monitor: {cron: "*/10 * * * *", description: "定时记录内存状态", async handle(ctx) {
-      const store = await configOf(ctx); const config = await store.read(); const m = snapshot();
+      const store = await configOf(ctx);
+      const config = await store.read();
+      const m = snapshot();
       if (config.enabled && (m.heap > config.heap || m.rss > config.rss)) {
         ctx.log.info("memory.threshold", {heap: Math.round(m.heap), rss: Math.round(m.rss)});
       }

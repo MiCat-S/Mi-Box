@@ -96,7 +96,8 @@ async function compactList(ids: readonly string[]): Promise<readonly Html[]> {
     // Keep each expandable block within the renderer's HTML and entity budgets.
     if (body && (body.length + row.length + 1 > 2400 || rows === 60)) {
       blocks.push(...await richText(`<blockquote expandable>${body}</blockquote>`));
-      body = ""; rows = 0;
+      body = "";
+      rows = 0;
     }
     body += `${body ? "\n" : ""}${row}`;
     rows += 1;
@@ -554,17 +555,20 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         }
         const limit = 2 * 1024 * 1024;
         if (BigInt(document.size.toString()) > BigInt(limit)) {
-          await ctx.telegram.edit(invocation.message, "本地插件文件不能超过 2 MiB"); return;
+          await ctx.telegram.edit(invocation.message, "本地插件文件不能超过 2 MiB");
+          return;
         }
         if (host.pluginState(localId) && !releases.snapshot().generations.some(item => item.id === localId)) {
-          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
+          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
+          return;
         }
         await ctx.files.withTemp(async (directory, signal) => {
           const bytes = await ctx.telegram.withClient(async (client, clientSignal) => {
             const chunks: Buffer[] = [];
             let size = 0;
             for await (const chunk of client.iterDownload(raw, {requestSize: 65536})) {
-              signal.throwIfAborted(); clientSignal.throwIfAborted();
+              signal.throwIfAborted();
+              clientSignal.throwIfAborted();
               size += chunk.length;
               if (size > limit) throw Object.assign(new Error("Local plugin exceeds limit"), {code: "LIMIT"});
               chunks.push(Buffer.from(chunk));
@@ -607,11 +611,15 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         const defaults = new Set<string>();
         const targets = all ? [...new Set(installedIds)].sort() : requested.filter(value => {
           const local = defaultFor(value);
-          if (local && !installedIds.includes(local)) {defaults.add(local); return false;}
+          if (local && !installedIds.includes(local)) {
+            defaults.add(local);
+            return false;
+          }
           return true;
         });
         if (all && (updating || removing) && !targets.length) {
-          await ctx.telegram.edit(invocation.message, "没有已安装的扩展插件", htmlOptions); return;
+          await ctx.telegram.edit(invocation.message, "没有已安装的扩展插件", htmlOptions);
+          return;
         }
         await ctx.telegram.edit(invocation.message,
           renderFeedback({state: "working", title: !all ? `正在${removing ? "卸载" : "下载并构建"}所选扩展…` : removing ? "正在卸载全部已安装扩展…" : updating ? "正在下载并构建已安装扩展…" : "正在下载并构建全部可安装扩展…"}), htmlOptions);
@@ -647,7 +655,10 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         const failed: {id: string; code: string}[] = [];
         for (const [index, candidate] of result.candidates.entries()) {
           ctx.signal.throwIfAborted();
-          if (all && !updating && !removing && host.pluginState(candidate.id)) {skipped.add(candidate.id); continue;}
+          if (all && !updating && !removing && host.pluginState(candidate.id)) {
+            skipped.add(candidate.id);
+            continue;
+          }
           let failure: string | undefined;
           if (candidate.error || !removing && !candidate.revision) {
             failure = candidate.error === "AMBIGUOUS" ? "AMBIGUOUS"
@@ -661,7 +672,10 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
               else await releases.activate(candidate.id, candidate.revision!);
               if (!updating || !unchanged.has(candidate.id)) completedIds.push(candidate.id);
             }
-            catch (error) {ctx.signal.throwIfAborted(); failure = errorCode(error);}
+            catch (error) {
+              ctx.signal.throwIfAborted();
+              failure = errorCode(error);
+            }
           }
           if (failure) {
             failed.push({id: candidate.id, code: failure});
@@ -709,7 +723,8 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
       }
       const localDefault = defaultFor(id);
       if (localDefault && !installedIds.includes(localDefault)) {
-        await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
+        await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
+        return;
       }
       if (action === "remove") {
         const resolved = resolvePluginId(id, installedIds);
@@ -731,16 +746,19 @@ export default function createTpm(host: PluginHost, releases: PluginReleases, ro
         const candidate = await repository(ctx, "build", id);
         if (candidate.error === "AMBIGUOUS") {
           await ctx.telegram.edit(invocation.message,
-            `插件名 ${id} 存在大小写冲突：${(candidate.ids ?? []).join("、")}；请使用完整名称`); return;
+            `插件名 ${id} 存在大小写冲突：${(candidate.ids ?? []).join("、")}；请使用完整名称`);
+          return;
         }
         if (candidate.error === "NOT_FOUND") {
-          await ctx.telegram.edit(invocation.message, `插件 ${id} 不存在或不可用`); return;
+          await ctx.telegram.edit(invocation.message, `插件 ${id} 不存在或不可用`);
+          return;
         }
         const canonical = candidate.id;
         if (!canonical || !isPluginId(canonical) || !candidate.revision) throw new Error("Invalid candidate");
         const installed = installedIds.includes(canonical);
         if (host.pluginState(canonical) && !installed) {
-          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载"); return;
+          await ctx.telegram.edit(invocation.message, "默认模块由程序管理，不通过 TPM 替换或卸载");
+          return;
         }
         const current = releases.snapshot().generations.find(item => item.id === canonical && item.state === "active");
         if (action === "update" && current?.revision === candidate.revision) {

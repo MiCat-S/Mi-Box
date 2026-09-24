@@ -125,7 +125,10 @@ export class PrefixEnvStore implements PrefixPersistence {
       signal.throwIfAborted();
       if (!snapshot.length || snapshot.some(prefix => typeof prefix !== "string" || !prefix || /[\s\0]/u.test(prefix))) throw failure();
       try { await this.write(snapshot.join(" "), signal); }
-      catch { signal.throwIfAborted(); throw failure(); }
+      catch {
+        signal.throwIfAborted();
+        throw failure();
+      }
     });
     const settled = operation.then(() => undefined, () => undefined);
     writes.set(this.file, settled);

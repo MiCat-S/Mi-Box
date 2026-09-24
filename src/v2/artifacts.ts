@@ -213,7 +213,10 @@ export async function inspectArtifact(directory: string): Promise<InspectedArtif
         const filename = path.join(root, name);
         const stat = await fsp.lstat(filename);
         if (stat.isSymbolicLink()) throw new ArtifactError("BOUNDARY");
-        if (stat.isDirectory()) { await visit(name); continue; }
+        if (stat.isDirectory()) {
+          await visit(name);
+          continue;
+        }
         if (!stat.isFile()) throw new ArtifactError("BOUNDARY");
         if (name === "manifest.json") continue;
         const fingerprint = expected.get(name);
@@ -352,7 +355,10 @@ function loadOwned(owner: Owner, filename: string, parent?: NodeModule): unknown
   };
   const scopedRequire = ((request: string): unknown => {
     const resolved = resolveRequest(request);
-    if (request === "telebox/sdk") { link(mod, require.cache[sdkFilename]); return sdk; }
+    if (request === "telebox/sdk") {
+      link(mod, require.cache[sdkFilename]);
+      return sdk;
+    }
     if (within(owner.artifact.directory, resolved)) return loadOwned(owner, resolved, mod);
     // Shared packages are loaded by this runtime module, never owned or evicted.
     const value: unknown = require(resolved);

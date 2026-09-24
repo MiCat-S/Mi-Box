@@ -133,13 +133,19 @@ type LookupCallback = (error: NodeJS.ErrnoException | null, address?: string | L
 function createPublicLookup(resolve: typeof dnsLookup) {
   return (hostname: string, options: {family?: number; hints?: number; all?: boolean}, callback: LookupCallback): void => {
   resolve(hostname, {...options, all: true}, (error, addresses) => {
-    if (error) { callback(error); return; }
+    if (error) {
+      callback(error);
+      return;
+    }
     if (!addresses.length || addresses.some(item => addressBlocked(item.address, item.family))) {
       callback(blockedAddressError());
       return;
     }
     const selected = options.family ? addresses.filter(item => item.family === options.family) : addresses;
-    if (!selected.length) { callback(blockedAddressError()); return; }
+    if (!selected.length) {
+      callback(blockedAddressError());
+      return;
+    }
     if (options.all) callback(null, selected);
     else callback(null, selected[0]!.address, selected[0]!.family);
   });

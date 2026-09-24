@@ -213,10 +213,16 @@ export function renderStatusCard(snapshot: StatusSnapshot, name: string): Buffer
   ctx.strokeStyle = "rgba(39, 103, 139, 0.14)";
   ctx.lineWidth = 1;
   for (let x = 48; x < STATUS_CARD_WIDTH; x += 64) {
-    ctx.beginPath(); ctx.moveTo(x, 48); ctx.lineTo(x, STATUS_CARD_HEIGHT - 48); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, 48);
+    ctx.lineTo(x, STATUS_CARD_HEIGHT - 48);
+    ctx.stroke();
   }
   for (let y = 48; y < STATUS_CARD_HEIGHT; y += 64) {
-    ctx.beginPath(); ctx.moveTo(48, y); ctx.lineTo(STATUS_CARD_WIDTH - 48, y); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(48, y);
+    ctx.lineTo(STATUS_CARD_WIDTH - 48, y);
+    ctx.stroke();
   }
 
   roundedRect(ctx, 30, 30, STATUS_CARD_WIDTH - 60, STATUS_CARD_HEIGHT - 60, 34);

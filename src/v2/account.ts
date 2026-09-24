@@ -147,7 +147,14 @@ export async function lockAccount(key: Buffer): Promise<() => Promise<void>> {
     });
     if (result.error) throw new AccountError(isCode(result.error, "ENOENT") ? "FLOCK_NOT_FOUND" : "LOCK");
     if (result.status !== 0) throw new AccountError(result.status === 1 ? "BUSY" : "LOCK");
-  } catch (error) {await handle.close(); throw error instanceof AccountError ? error : new AccountError("LOCK");}
+  } catch (error) {
+    await handle.close();
+    throw error instanceof AccountError ? error : new AccountError("LOCK");
+  }
   let closed = false;
-  return async () => {if (!closed) {closed = true; await handle.close();}};
+  return async () => {
+    if (closed) return;
+    closed = true;
+    await handle.close();
+  };
 }

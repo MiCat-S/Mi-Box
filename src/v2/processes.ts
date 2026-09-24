@@ -75,22 +75,40 @@ export class ProcessError extends Error {
 }
 
 export class ProcessSpawnError extends ProcessError {
-  constructor(output?: CapturedOutput) { super("SPAWN_FAILED", "Helper process could not start", output); this.name = "ProcessSpawnError"; }
+  constructor(output?: CapturedOutput) {
+    super("SPAWN_FAILED", "Helper process could not start", output);
+    this.name = "ProcessSpawnError";
+  }
 }
 export class ProcessExitError extends ProcessError {
-  constructor(output: CapturedOutput) { super("EXIT_FAILED", "Helper process exited unsuccessfully", output); this.name = "ProcessExitError"; }
+  constructor(output: CapturedOutput) {
+    super("EXIT_FAILED", "Helper process exited unsuccessfully", output);
+    this.name = "ProcessExitError";
+  }
 }
 export class ProcessAbortedError extends ProcessError {
-  constructor(output?: CapturedOutput) { super("ABORTED", "Helper process was cancelled", output); this.name = "ProcessAbortedError"; }
+  constructor(output?: CapturedOutput) {
+    super("ABORTED", "Helper process was cancelled", output);
+    this.name = "ProcessAbortedError";
+  }
 }
 export class ProcessTimeoutError extends ProcessError {
-  constructor(output: CapturedOutput) { super("TIMED_OUT", "Helper process exceeded its execution deadline", output); this.name = "ProcessTimeoutError"; }
+  constructor(output: CapturedOutput) {
+    super("TIMED_OUT", "Helper process exceeded its execution deadline", output);
+    this.name = "ProcessTimeoutError";
+  }
 }
 export class ProcessOutputLimitError extends ProcessError {
-  constructor(output: CapturedOutput) { super("OUTPUT_LIMIT", "Helper process exceeded its output limit", output); this.name = "ProcessOutputLimitError"; }
+  constructor(output: CapturedOutput) {
+    super("OUTPUT_LIMIT", "Helper process exceeded its output limit", output);
+    this.name = "ProcessOutputLimitError";
+  }
 }
 export class ProcessClosedError extends ProcessError {
-  constructor() { super("CLOSED", "Helper process runner is closed"); this.name = "ProcessClosedError"; }
+  constructor() {
+    super("CLOSED", "Helper process runner is closed");
+    this.name = "ProcessClosedError";
+  }
 }
 
 interface Invocation {
@@ -272,7 +290,10 @@ export class ScopedProcesses {
       const alive = (): boolean => {
         if (!child.pid) return false;
         if (!POSIX_GROUPS) return !exited;
-        try { process.kill(-child.pid, 0); return true; }
+        try {
+          process.kill(-child.pid, 0);
+          return true;
+        }
         catch (error) {
           if (isMissing(error)) return false;
           // Darwin can transiently report EPERM while reaping a group after an accepted SIGKILL.
@@ -294,12 +315,18 @@ export class ScopedProcesses {
       };
       const finish = (): void => {
         settled = true;
-        clearTimeout(deadline); clearTimeout(grace); clearTimeout(poll);
+        clearTimeout(deadline);
+        clearTimeout(grace);
+        clearTimeout(poll);
         signal.removeEventListener("abort", onAbort);
-        child.off("error", onError); child.off("exit", onExit); child.off("close", onClose);
+        child.off("error", onError);
+        child.off("exit", onExit);
+        child.off("close", onClose);
         child.stdin.off("error", onPipeError);
-        child.stdout.off("error", onPipeError); child.stderr.off("error", onPipeError);
-        child.stdout.off("data", onStdout); child.stderr.off("data", onStderr);
+        child.stdout.off("error", onPipeError);
+        child.stderr.off("error", onPipeError);
+        child.stdout.off("data", onStdout);
+        child.stderr.off("data", onStderr);
         const output = {stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode, signal: exitSignal};
         if (kind) reject(failure(kind, output));
         else if (exitCode !== 0 || exitSignal) reject(new ProcessExitError(output));
@@ -308,7 +335,10 @@ export class ScopedProcesses {
       const check = (): void => {
         if (settled) return;
         const live = alive();
-        if (closed && !live) { finish(); return; }
+        if (closed && !live) {
+          finish();
+          return;
+        }
         if (stopping && !poll) {
           poll = setTimeout(() => {
             poll = undefined;
@@ -334,31 +364,46 @@ export class ScopedProcesses {
       };
       const capture = (chunks: Buffer[], chunk: Buffer): void => {
         const keep = Math.min(chunk.length, invocation.maxOutputBytes - retainedBytes);
-        if (keep > 0) { chunks.push(Buffer.from(chunk.subarray(0, keep))); retainedBytes += keep; }
+        if (keep > 0) {
+          chunks.push(Buffer.from(chunk.subarray(0, keep)));
+          retainedBytes += keep;
+        }
         if (keep < chunk.length) stop("output");
       };
       const onStdout = (chunk: Buffer): void => capture(stdout, chunk);
       const onStderr = (chunk: Buffer): void => capture(stderr, chunk);
       const onPipeError = (): void => { if (!stopping) stop("io"); };
       const onError = (): void => {
-        if (!child.pid) { kind = "spawn"; exited = true; }
+        if (!child.pid) {
+          kind = "spawn";
+          exited = true;
+        }
         else kind ??= "control";
         stop();
       };
       const onExit = (code: number | null, termination: NodeJS.Signals | null): void => {
-        exited = true; exitCode = code; exitSignal = termination;
+        exited = true;
+        exitCode = code;
+        exitSignal = termination;
         stop(code !== 0 || termination ? "exit" : undefined);
       };
       const onClose = (code: number | null, termination: NodeJS.Signals | null): void => {
-        closed = true; exited = true; exitCode = code; exitSignal = termination;
+        closed = true;
+        exited = true;
+        exitCode = code;
+        exitSignal = termination;
         stop(code !== 0 || termination ? "exit" : undefined);
       };
       const onAbort = (): void => stop("aborted");
 
-      child.on("error", onError); child.on("exit", onExit); child.on("close", onClose);
+      child.on("error", onError);
+      child.on("exit", onExit);
+      child.on("close", onClose);
       child.stdin.on("error", onPipeError);
-      child.stdout.on("error", onPipeError); child.stderr.on("error", onPipeError);
-      child.stdout.on("data", onStdout); child.stderr.on("data", onStderr);
+      child.stdout.on("error", onPipeError);
+      child.stderr.on("error", onPipeError);
+      child.stdout.on("data", onStdout);
+      child.stderr.on("data", onStderr);
       signal.addEventListener("abort", onAbort, {once: true});
       deadline = setTimeout(() => stop("timeout"), invocation.timeoutMs);
       if (signal.aborted) onAbort();

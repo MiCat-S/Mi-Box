@@ -36,7 +36,8 @@ const pingCommand: CommandDefinition = {
   async handle(invocation, ctx) {
     const value = invocation.args[0];
     if (value === "help" || value === "h") {
-      await ctx.telegram.edit(invocation.message, `用法：${invocation.prefix}ping 测 Telegram 延迟；${invocation.prefix}ping 域名 测 HTTPS（直连）`); return;
+      await ctx.telegram.edit(invocation.message, `用法：${invocation.prefix}ping 测 Telegram 延迟；${invocation.prefix}ping 域名 测 HTTPS（直连）`);
+      return;
     }
     if (!value) {
       try {

@@ -124,8 +124,14 @@ export class ScopedSafeRegExp {
         };
         const onOnline = (): void => finish();
         const onError = (): void => finish(new SafeRegExpError("WORKER_FAILED"));
-        const onAbort = (): void => { void terminate(); finish(abortError(signal!)); };
-        const timer = setTimeout(() => { void terminate(); finish(new SafeRegExpError("WORKER_FAILED")); }, SAFE_REGEXP_LIMITS.startupTimeoutMs);
+        const onAbort = (): void => {
+          void terminate();
+          finish(abortError(signal!));
+        };
+        const timer = setTimeout(() => {
+          void terminate();
+          finish(new SafeRegExpError("WORKER_FAILED"));
+        }, SAFE_REGEXP_LIMITS.startupTimeoutMs);
         worker.once("online", onOnline);
         worker.once("error", onError);
         signal?.addEventListener("abort", onAbort, {once: true});

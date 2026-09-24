@@ -37,7 +37,10 @@ function replacements(text: string, config: Readonly<IpPrivacy>): Replacement[] 
 }
 export function maskIpText(text: string, config = getIpPrivacy()): string {
   let result = "", start = 0;
-  for (const item of replacements(text, config)) {result += text.slice(start, item.start) + item.value; start = item.end;}
+  for (const item of replacements(text, config)) {
+    result += text.slice(start, item.start) + item.value;
+    start = item.end;
+  }
   return result + text.slice(start);
 }
 function copy<T extends object>(value: T): T {return Object.assign(Object.create(Object.getPrototypeOf(value)), value);}
@@ -81,7 +84,8 @@ function redactMedia(source: unknown): unknown {
   if (Array.isArray(media.attributes)) media.attributes = media.attributes.map(attribute => {
     if (attribute?.className !== "DocumentAttributeFilename") return attribute;
     const next = copy(attribute) as {fileName: string};
-    next.fileName = maskIpText(next.fileName); return next;
+    next.fileName = maskIpText(next.fileName);
+    return next;
   });
   if (media.file && typeof media.file === "object" && "name" in media.file && typeof media.file.name === "string") {
     media.file = Object.assign(copy(media.file), {name: maskIpText(media.file.name)});
@@ -96,7 +100,9 @@ function redactMarkup(source: unknown): unknown {
     const next = copy(row) as {buttons: Record<string, unknown>[]};
     next.buttons = row.buttons.filter((button: {url?: string; type?: {url?: string}}) =>
       !(button.url && ipLink(button.url)) && !(button.type?.url && ipLink(button.type.url))).map((button: {text?: string}) => {
-      const next = copy(button); if (typeof next.text === "string") next.text = maskIpText(next.text); return next;
+      const next = copy(button);
+      if (typeof next.text === "string") next.text = maskIpText(next.text);
+      return next;
     });
     return next;
   }).filter(row => !Array.isArray(row.buttons) || row.buttons.length);
@@ -127,5 +133,11 @@ export function installIpPrivacy(client: object): () => void {
   };
   target.invoke = wrapper;
   installations.add(client);
-  return () => {installations.delete(client); if (target.invoke === wrapper) {if (descriptor) Object.defineProperty(target, "invoke", descriptor); else delete (target as Partial<typeof target>).invoke;}};
+  return () => {
+    installations.delete(client);
+    // Only undo our own patch; a later wrapper installed on top stays in place.
+    if (target.invoke !== wrapper) return;
+    if (descriptor) Object.defineProperty(target, "invoke", descriptor);
+    else delete (target as Partial<typeof target>).invoke;
+  };
 }

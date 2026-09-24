@@ -1,13 +1,22 @@
 export class QueueFullError extends Error {
-  constructor() { super("Execution queue is full"); this.name = "QueueFullError"; }
+  constructor() {
+    super("Execution queue is full");
+    this.name = "QueueFullError";
+  }
 }
 
 export class ExecutorClosedError extends Error {
-  constructor() { super("Execution queue is closed"); this.name = "ExecutorClosedError"; }
+  constructor() {
+    super("Execution queue is closed");
+    this.name = "ExecutorClosedError";
+  }
 }
 
 export class ReentrantExecutionError extends Error {
-  constructor() { super("A running task cannot submit to its own executor; use an external coordinator"); this.name = "ReentrantExecutionError"; }
+  constructor() {
+    super("A running task cannot submit to its own executor; use an external coordinator");
+    this.name = "ReentrantExecutionError";
+  }
 }
 
 interface ExecutionContext {
@@ -126,7 +135,10 @@ export class KeyedExecutor {
       this.closed = true;
       // Clear pending work before aborting: abort callbacks cannot mutate this batch.
       const pending = this.queue.splice(0);
-      for (const job of pending) { job.detach(); job.reject(reason); }
+      for (const job of pending) {
+        job.detach();
+        job.reject(reason);
+      }
       this.controller.abort(reason);
       this.pump();
     }

@@ -207,12 +207,24 @@ export async function serve(options: RuntimeOptions = {}): Promise<RuntimeResult
     let hostReport = host ? host.snapshot().lifecycle : rootScope.snapshot();
     let transportReport = transport.snapshot();
     let loggingReport = logging.snapshot();
-    await attempt(async () => {eventReport = await events.drain(15000); requireComplete("events", eventReport);});
+    await attempt(async () => {
+      eventReport = await events.drain(15000);
+      requireComplete("events", eventReport);
+    });
     await attempt(async () => {if (releases) requireComplete("plugins", await releases.shutdown(30000));});
-    await attempt(async () => {if (host) {hostReport = await host.shutdown(30000); requireComplete("host", hostReport);}});
+    await attempt(async () => {if (host) {
+      hostReport = await host.shutdown(30000);
+      requireComplete("host", hostReport);
+    }});
     await attempt(() => releaseStorage.close());
-    await attempt(async () => {transportReport = await transport.drain(15000); requireComplete("transport", transportReport);});
-    await attempt(async () => {loggingReport = await logging.drain(15000); requireComplete("logging", loggingReport);});
+    await attempt(async () => {
+      transportReport = await transport.drain(15000);
+      requireComplete("transport", transportReport);
+    });
+    await attempt(async () => {
+      loggingReport = await logging.drain(15000);
+      requireComplete("logging", loggingReport);
+    });
     await attempt(() => client.destroy());
     releasePrivacy?.();
     compatibility?.cleanup();

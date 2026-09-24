@@ -40,7 +40,10 @@ export async function offlineCheck() {
         if (answer !== "ok") throw new Error("Plugin service check failed");
         probeCalls++;
       }}},
-      services: {echo: {description: "Offline service", handle(input) {serviceCalls++; return input;}}},
+      services: {echo: {description: "Offline service", handle(input) {
+        serviceCalls++;
+        return input;
+      }}},
     }));
     await host.load(createHelp(host));
     await host.load(createAlias(host, "1"));

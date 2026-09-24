@@ -29,7 +29,10 @@ const messages: Record<ReleaseErrorCode, string> = {
   NO_PREVIOUS: "No previous plugin release is recorded",
 };
 export class ReleaseError extends Error {
-  constructor(readonly code: ReleaseErrorCode) { super(messages[code]); this.name = "ReleaseError"; }
+  constructor(readonly code: ReleaseErrorCode) {
+    super(messages[code]);
+    this.name = "ReleaseError";
+  }
 }
 interface Generation { handle: PreparedArtifact; state: "active" | "draining" | "failed"; owner: object; }
 const revisionPattern = /^[a-f0-9]{64}$/;
@@ -131,7 +134,10 @@ export class PluginReleases {
         }
         throw error;
       }
-      if (old) {old.handle.release(); this.generations.delete(id);}
+      if (old) {
+        old.handle.release();
+        this.generations.delete(id);
+      }
     }, signal));
   }
 
@@ -197,11 +203,20 @@ export class PluginReleases {
           throw new ReleaseError("RESTORE");
         }
         this.generations.delete(id);
-        if (candidate !== old?.handle) { candidate.release(); candidateOwned = false; }
+        if (candidate !== old?.handle) {
+          candidate.release();
+          candidateOwned = false;
+        }
         if (old && !signal.aborted) {
           this.generations.set(id, old);
-          try { await this.host.load(old.handle.create(), old.owner); old.state = "active"; }
-          catch { old.state = "failed"; throw new ReleaseError("RESTORE"); }
+          try {
+            await this.host.load(old.handle.create(), old.owner);
+            old.state = "active";
+          }
+          catch {
+            old.state = "failed";
+            throw new ReleaseError("RESTORE");
+          }
         } else if (old) {
           old.handle.release();
           candidateOwned = false;

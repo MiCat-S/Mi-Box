@@ -104,7 +104,10 @@ export function installProtocolCompatibility(client: object): ProtocolCompatibil
   };
   const fetch: typeof originalFetch = async function (this: Internals["updateManager"], id, ...args) {
     if (!active) return originalFetch.call(this, id, ...args);
-    if (broken(records.get(id), Date.now())) { clear(id); return; }
+    if (broken(records.get(id), Date.now())) {
+      clear(id);
+      return;
+    }
     // Keep the existing bounded record alive locally across eviction while awaiting RPC.
     const record = records.get(id);
     try { return await originalFetch.call(this, id, ...args); }
@@ -143,7 +146,10 @@ export function installProtocolCompatibility(client: object): ProtocolCompatibil
         record = { first: now, count: 0, brokenAt: null, breaks: 0, loggedAt: null };
         records.set(id, record);
       }
-      if (broken(record, now)) { clear(id); return "suppress"; }
+      if (broken(record, now)) {
+        clear(id);
+        return "suppress";
+      }
       if (record.brokenAt !== null || now - record.first >= WINDOW) {
         record.count = 0;
         record.first = now;
