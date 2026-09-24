@@ -8,8 +8,9 @@
 config.json
 assets/*
 !assets/.gitkeep
-plugins/*
-!plugins/.gitkeep
+# Legacy plugin directory. V2 installs extensions under dist/v2-plugins;
+# keep ignoring leftovers on older deployments.
+plugins/
 temp/*
 !temp/.gitkeep
 node_modules/*
