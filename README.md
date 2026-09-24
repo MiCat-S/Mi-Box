@@ -40,7 +40,7 @@ npm run service:install
 
 ```text
 .agent .memory .ping .status .sysinfo .tpm .update
-.alias .autofix .bf .env .exec .h .help .loglevel
+.alias .autofix .bf .env .exec .h .help .ip .log .loglevel
 .prefix .restart .sudo .ver .version
 ```
 

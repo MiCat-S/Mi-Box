@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3] - 2026-09-24
+
+- 删除 V2 之前的遗留插件系统：`src/plugin`、`src/utils`、`src/hook`、只为它们服务的脚本链和旧版开发手册 `TELEBOX_DEVELOPMENT.md`，共约 3.9 万行。它们没有任何入口，构建产物删除前后逐字节相同。仍在运行旧版进程的部署照旧会被启动检查拒绝。
+- 根目录 `tsconfig.json` 改为继承 `tsconfig.v2.json`，编辑器打开 `src/v2` 时拿到正确配置；构建与类型检查本就显式使用 `tsconfig.v2.json`，不受影响。
+- 可读性整理：`src/v2` 与 `scripts/` 中把多条语句写在一行、把 `return`/`throw` 藏在行尾的写法改为每条语句独占一行；`.tpm` 安装/更新/卸载的实现按流程拆开；消息发送者判定改为按信任顺序逐条返回。行为不变。
+- README 的默认命令列表补上 `.ip` 与 `.log`。
+
 ## [0.9.2] - 2026-09-20
 
 - HTTP 层改为按需加载 `undici`：Node 自带的 `fetch` 已内置一份 undici，而顶层静态导入让用户态包在每次启动常驻第二份 HTTP 栈。只有 `denyPrivateAddresses` 需要它的 `Agent`，现改为首次使用时加载。启动常驻内存由约 122 MB 降至约 110 MB（−11.9 MB），加载模块数 321 → 211，行为不变。
