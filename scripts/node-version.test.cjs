@@ -14,7 +14,8 @@ test('any minor and patch of the pinned major pass', () => {
 });
 
 test('another major is refused and both versions are named', () => {
-  const other = `${requiredMajor() + 1}.0.0`;
+  const required = requiredMajor();
+  const other = `${required + 1}.0.0`;
   assert.throws(() => assertSupportedNode(other), error =>
-    error.message.includes(`Node.js ${requiredMajor()} is required`) && error.message.includes(`v${other}`));
+    error.message.includes(`Node.js ${required} is required`) && error.message.includes(`v${other}`));
 });

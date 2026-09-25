@@ -39,23 +39,23 @@ echo "== Dependencies and build"
 npm install --no-audit --no-fund
 npm run build:v2
 
-# mount_alias SOURCE ALIAS: expose SOURCE under the name ALIAS in the same
-# parent directory. A bind mount is a real directory, which the storage layer
-# insists on; a symlink would be rejected. Mounts do not survive a container
-# restart, so this has to run again in a new container.
+# mount_alias SOURCE ALIAS_DIR: make SOURCE visible under a second name in
+# the same parent directory. A bind mount is a real directory, which the
+# storage layer insists on; a symlink would be rejected. Mounts do not survive
+# a container restart, so this has to run again in a new container.
 mount_alias() {
-  local source="$1" alias="$2"
-  if mountpoint -q "$alias"; then
+  local source="$1" alias_dir="$2"
+  if mountpoint -q "$alias_dir"; then
     return
   fi
-  if [ -e "$alias" ]; then
-    echo "$alias already exists; leaving it alone"
+  if [ -e "$alias_dir" ]; then
+    echo "$alias_dir already exists; leaving it alone"
     return
   fi
-  mkdir "$alias"
-  if ! mount --bind "$source" "$alias"; then
-    rmdir "$alias"
-    echo "Could not bind-mount $source at $alias; copy it there as a real directory instead" >&2
+  mkdir "$alias_dir"
+  if ! mount --bind "$source" "$alias_dir"; then
+    rmdir "$alias_dir"
+    echo "Could not bind-mount $source at $alias_dir; copy it there as a real directory instead" >&2
   fi
 }
 
