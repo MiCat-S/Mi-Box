@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const childProcess = require('node:child_process');
+const {assertSupportedNode} = require('./node-version.cjs');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
@@ -49,6 +50,7 @@ function sourcesIn(sourceDir, includeTests) {
 // Only the project root is configurable for fixtures. Source/output paths stay
 // fixed, disjoint, and symlink-free so cleanup cannot follow an output alias.
 function build({ rootDir = PROJECT_ROOT, includeTests = false } = {}) {
+  assertSupportedNode();
   if (typeof rootDir !== 'string' || rootDir.trim() === '') {
     throw new TypeError('rootDir must be a non-empty directory path');
   }

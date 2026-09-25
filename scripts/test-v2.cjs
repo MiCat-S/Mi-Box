@@ -29,6 +29,7 @@ function visit(directory) {
 }
 visit(path.join(root, 'dist/v2'));
 if (!tests.length) throw new Error('No compiled v2 tests found');
+tests.push(path.join(__dirname, 'node-version.test.cjs'));
 tests.push(path.join(__dirname, 'build-v2.test.cjs'));
 tests.push(path.join(__dirname, 'build-v2-plugin.test.cjs'));
 tests.push(path.join(__dirname, 'server-v2-check.test.cjs'));

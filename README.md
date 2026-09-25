@@ -98,6 +98,8 @@ npm run check:v2
 ```
 
 从其他 Node 主版本切换后需要重新安装依赖，以匹配 SQLite、canvas 等原生模块的 ABI。
+`npm run build:v2` 与各测试脚本起跑时都会核对当前 Node 主版本是否与 `engines.node` 一致，
+不一致时立即报错退出，不会在错误的版本上静默继续。
 生产服务仍仅支持 Linux。macOS 可使用 `npm run dev`，该命令为运行子进程设置
 `NODE_ENV=development`，启动时打印开发模式提示。需要提前安装支持
 `flock --nonblock <fd>` 的命令（Linux 使用 util-linux，macOS 可用 `brew install flock`）。
@@ -140,6 +142,14 @@ TELEBOX_PLUGINS_ROOT=/absolute/path/to/plugins npm run test:v2
 
 `config.json`、`.env`、`assets/` 含账号和插件数据，不得公开上传。
 服务管理见 [运维说明](deploy/systemd/README.md)，许可证见 [LICENSE](LICENSE)。
+
+### 云端容器（Claude Code on the web）
+
+容器预装的是 Node 22，检出目录也不叫 `TeleBox-Core`。执行一次 `bash scripts/setup-cloud.sh`：它用预装的 nvm
+安装 `.nvmrc` 指定的 Node 24、`npm install`、`npm run build:v2`，并把本检出与旁边的插件检出以 bind mount 挂成
+`../TeleBox-Core` 与 `../TeleBox-Plugins`——跨仓测试要求这两个真实目录名。脚本可重复执行，插件仓库中途才加入
+会话时再跑一次即可。会话里的命令不共享 shell 状态，后续命令请按脚本结尾打印的方式把 Node 24 加进 PATH，
+或把该脚本配置成 SessionStart hook。
 
 ### 自定义显示名
 

@@ -55,7 +55,11 @@ function assertSuccess(result) {
 }
 
 function addTooling(root) {
-  put(root, 'scripts/build-v2.cjs', fs.readFileSync(path.join(__dirname, 'build-v2.cjs')));
+  for (const script of ['build-v2.cjs', 'node-version.cjs']) {
+    put(root, `scripts/${script}`, fs.readFileSync(path.join(__dirname, script)));
+  }
+  // node-version.cjs reads engines.node from the project's package.json.
+  put(root, 'package.json', fs.readFileSync(path.join(PROJECT_ROOT, 'package.json')));
   put(root, 'tsconfig.v2.json', fs.readFileSync(path.join(PROJECT_ROOT, 'tsconfig.v2.json')));
   fs.symlinkSync(path.join(PROJECT_ROOT, 'node_modules'), path.join(root, 'node_modules'), 'dir');
 }
