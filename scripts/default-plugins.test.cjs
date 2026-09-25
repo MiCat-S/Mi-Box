@@ -26,7 +26,7 @@ test('a standalone Core checkout builds and checks while preserving installed ex
   t.after(() => fs.rmSync(base, {recursive: true, force: true}));
   const project = path.join(base, 'core');
   fs.mkdirSync(path.join(project, 'scripts'), {recursive: true});
-  for (const name of ['build-v2.cjs', 'render-service.cjs']) fs.copyFileSync(path.join(root, 'scripts', name), path.join(project, 'scripts', name));
+  for (const name of ['build-v2.cjs', 'node-version.cjs', 'render-service.cjs']) fs.copyFileSync(path.join(root, 'scripts', name), path.join(project, 'scripts', name));
   for (const name of ['package.json', 'tsconfig.v2.json']) fs.copyFileSync(path.join(root, name), path.join(project, name));
   fs.cpSync(path.join(root, 'src/v2'), path.join(project, 'src/v2'), {recursive: true,
     filter: source => !source.endsWith('.test.ts')});
